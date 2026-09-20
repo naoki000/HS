@@ -90,11 +90,10 @@ final class ScreenCaptureManager: NSObject, ObservableObject {
     // MARK: - ストリーム開始
 
     private func beginStream(with filter: SCContentFilter) {
+        // SCStreamConfiguration のプロパティは macOS 専用のものが多い。
+        // minimumFrameInterval / queueDepth / pixelFormat はいずれも iOS では使えない。
+        // Apple の案内どおり、出力を変える必要がなければ既定値のまま使う。
         let configuration = SCStreamConfiguration()
-        // Phase 1 は取得の確認だけなので低めに抑える。
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 10)
-        configuration.queueDepth = 5
-        configuration.pixelFormat = kCVPixelFormatType_32BGRA
 
         do {
             let newStream = SCStream(filter: filter,

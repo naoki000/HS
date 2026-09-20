@@ -43,6 +43,7 @@ HOST_FILE = 'arena_host.txt'
 HEROES = ('DEATHKNIGHT', 'DEMONHUNTER', 'DRUID', 'HUNTER', 'MAGE', 'PALADIN',
           'PRIEST', 'ROGUE', 'SHAMAN', 'WARLOCK', 'WARRIOR')
 HS_URL = 'https://hsreplay.net/ja/arena/cards/#text='
+HS_SUFFIX = '&view=advanced'
 SLOTS = (('left', '左'), ('middle', '中央'), ('right', '右'))
 
 
@@ -77,7 +78,11 @@ def grab(host):
         data = r.read()
     im = Image.open(io.BytesIO(data))
     im.load()
-    return im.convert('RGB')
+    im = im.convert('RGB')
+    # 配信が上下逆のときはここで戻す。切り出し座標は触らない。
+    if A.load_flip():
+        im = im.transpose(Image.ROTATE_180)
+    return im
 
 
 def slot_query(im, rect):
@@ -113,7 +118,8 @@ def judge(host, hero, art):
         print('画面を取得できません: %s' % e)
         print('  %s に配信が出ているか確認してください。' % host)
         return
-    print('取得 %dx%d  %.1fs' % (im.size[0], im.size[1], time.time() - t0))
+    print('取得 %dx%d  %.1fs%s' % (im.size[0], im.size[1], time.time() - t0,
+                                 '  (180°補正)' if A.load_flip() else ''))
 
     picks = []
     for key, label in SLOTS:
@@ -135,7 +141,7 @@ def judge(host, hero, art):
 
     print()
     if picks:
-        print(HS_URL + urllib.parse.quote(','.join(picks)))
+        print(HS_URL + urllib.parse.quote(','.join(picks)) + HS_SUFFIX)
     else:
         print('一致するカードを特定できませんでした。')
     print('合計 %.1fs' % (time.time() - t0))

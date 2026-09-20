@@ -19,8 +19,12 @@ input[type=text],input:not([type]){flex:1}
 button{background:#21262d;color:#f0f3f6;font-weight:700;cursor:pointer}
 button.primary{background:#238636;border-color:#238636;flex:1}
 .status{font-size:13px;color:#9da7b3;min-height:20px;padding:4px 2px}
-.frame{position:relative;background:#000;border-radius:12px;overflow:hidden;margin-top:8px}
-#screen{display:block;width:100%;height:auto;min-height:120px}
+.frame{position:relative;background:#000;border-radius:12px;overflow:hidden;margin-top:8px;
+  -webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+#screen,#view{display:block;width:100%;height:auto;min-height:120px;
+  pointer-events:none;-webkit-touch-callout:none;-webkit-user-drag:none}
+#view[hidden],#screen[hidden]{display:none}
+#zoom{position:relative;transform-origin:0 0}
 #ov{position:absolute;inset:0;pointer-events:none}
 .box{position:absolute;border:2px solid rgba(240,136,62,.55);border-radius:3px}
 .box.art{border-color:#3fb950;border-width:2px;pointer-events:auto;cursor:move;touch-action:none}
@@ -53,8 +57,8 @@ button.primary{background:#238636;border-color:#238636;flex:1}
 .cands li::before{counter-increment:r;content:counter(r) ".";color:#6e7781;margin-right:4px}
 .cands li{cursor:pointer}
 .cands li.pick{color:#58a6ff}
-#go{display:none;width:100%;background:#1f6feb;border-color:#1f6feb;margin-top:12px;padding:14px}
-#picked{font-size:13px;color:#9da7b3;margin-top:10px;line-height:1.7}
+#go{display:none;width:100%;background:#1f6feb;border-color:#1f6feb;margin:2px 0 4px;padding:14px}
+#picked{font-size:13px;color:#9da7b3;margin-bottom:6px;line-height:1.7}
 .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sc{color:#9da7b3;font-variant-numeric:tabular-nums}
 details{margin-top:14px;background:#151b23;border:1px solid #30363d;border-radius:12px;padding:10px 12px}
@@ -63,6 +67,7 @@ summary{cursor:pointer;font-weight:700}
 .calibGrid input{padding:0}
 .calibGrid b{font-variant-numeric:tabular-nums;font-size:12px;min-width:42px;text-align:right}
 .hint{font-size:12px;color:#9da7b3;line-height:1.6}
+.flipRow{display:flex;align-items:center;gap:8px;font-size:13px;color:#f0f3f6}
 #alert{display:none;background:#2d1618;border:1px solid #a4232a;color:#ffb4b0;
   border-radius:10px;padding:12px 14px;margin:10px 0;font-size:14px;line-height:1.7}
 #alert code{background:#0d1117;padding:2px 6px;border-radius:4px}
@@ -95,16 +100,20 @@ summary{cursor:pointer;font-weight:700}
   <button id="judge" class="primary">判定</button>
 </div>
 
+<button id="go">HSReplay で3枚の勝率を見る</button>
+<div id="picked"></div>
+
 <div id="status" class="status">接続先を入力してください。</div>
 
 <div class="frame">
-  <img id="screen" alt="">
-  <div id="ov" hidden></div>
+  <div id="zoom">
+    <img id="screen" alt="">
+    <canvas id="view" hidden></canvas>
+    <div id="ov" hidden></div>
+  </div>
 </div>
 
 <div id="cards" class="cards"></div>
-<button id="go">HSReplay で3枚の勝率を見る</button>
-<div id="picked"></div>
 
 <details>
   <summary>切り取り範囲の調整</summary>
@@ -116,6 +125,14 @@ summary{cursor:pointer;font-weight:700}
     <span>Y %</span><input type="range" id="ay" min="0" max="95" step="0.1"><b id="ayv"></b>
     <span>幅 %</span><input type="range" id="aw" min="2" max="100" step="0.1"><b id="awv"></b>
     <span>高さ %</span><input type="range" id="ah" min="2" max="100" step="0.1"><b id="ahv"></b>
+  </div>
+  <div class="row">
+    <label class="flipRow"><input type="checkbox" id="zoomOn" checked>
+      カード部分だけを拡大して調整する</label>
+  </div>
+  <div class="row">
+    <label class="flipRow"><input type="checkbox" id="flip" checked>
+      配信が上下逆のときに ON（180°補正）</label>
   </div>
   <div class="row">
     <select id="calSlot" aria-label="調整する枠">
@@ -180,11 +197,42 @@ function extractMana(src, r, iw, ih) {
 let ART = null;
 let saveTimer = null;
 
+// 配信が 180° ひっくり返る場合の補正。表示も切り出しもこの補正後の画像を見る。
+let FLIP = true;
+
+function applyFlip() {
+  const img = $('screen'), cv = $('view');
+  if (!img.naturalWidth) return;
+  if (FLIP) {
+    cv.width = img.naturalWidth;
+    cv.height = img.naturalHeight;
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+    cx.translate(cv.width, cv.height);
+    cx.rotate(Math.PI);
+    cx.drawImage(img, 0, 0);
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  cv.hidden = !FLIP;
+  img.hidden = FLIP;
+}
+
+function frameSrc() {
+  return FLIP ? $('view') : $('screen');
+}
+function frameW() {
+  const s = frameSrc();
+  return s.naturalWidth || s.width;
+}
+function frameH() {
+  const s = frameSrc();
+  return s.naturalHeight || s.height;
+}
+
 async function loadArt() {
   try {
     const j = await (await fetch('/api/calibration')).json();
-    if (j.ok && j.art) ART = j.art;
-  } catch (e) { /* サーバに届かない場合は後で既定値 */ }
+    if (j.ok && j.art) ART = j.art;    if (j.ok) FLIP = !!j.flip;  } catch (e) { /* サーバに届かない場合は後で既定値 */ }
   if (!ART) {
     ART = { left:   { x: 0.167, y: 0.115, w: 0.092, h: 0.054 },
             middle: { x: 0.341, y: 0.115, w: 0.092, h: 0.054 },
@@ -196,7 +244,7 @@ function saveArt() {
   saveTimer = setTimeout(() => {
     fetch('/api/calibration', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ art: ART })
+      body: JSON.stringify({ art: ART, flip: FLIP })
     }).catch(() => {});
   }, 400);
 }
@@ -281,8 +329,9 @@ function refresh() {
 }
 
 $('screen').addEventListener('load', () => {
-  $('status').textContent = '接続済み  ' +
-    $('screen').naturalWidth + '×' + $('screen').naturalHeight;
+  applyFlip();
+  $('status').textContent = '接続済み  ' + frameW() + '×' + frameH() +
+    (FLIP ? '  （180°補正中）' : '');
   $('ov').hidden = false;
   drawOverlay();
 });
@@ -290,6 +339,34 @@ $('screen').addEventListener('error', () => {
   $('status').textContent = '取得できません。IPとCast to Browserの配信を確認してください。';
   $('ov').hidden = true;
 });
+
+// 長押しの保存メニューが出ると枠をドラッグできない
+document.querySelector('.frame').addEventListener('contextmenu', e => e.preventDefault());
+
+/// 3枚の枠を囲む範囲だけを拡大する。座標は getBoundingClientRect が
+/// 変形後の値を返すので、ドラッグの計算はそのままで正しく動く。
+function applyZoom() {
+  const wrap = document.querySelector('.frame');
+  const z = $('zoom');
+  if (!ART || !$('zoomOn').checked || !frameW()) {
+    z.style.transform = '';
+    wrap.style.height = '';
+    return;
+  }
+  let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+  SLOTS.forEach(s => {
+    const a = ART[s.key], m = manaRect(s.key);
+    x0 = Math.min(x0, a.x, m.x); y0 = Math.min(y0, a.y, m.y);
+    x1 = Math.max(x1, a.x + a.w, m.x + m.w);
+    y1 = Math.max(y1, a.y + a.h, m.y + m.h);
+  });
+  const pad = 0.015;
+  x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad);
+  x1 = Math.min(1, x1 + pad); y1 = Math.min(1, y1 + pad);
+  const k = 1 / Math.max(x1 - x0, 0.02);
+  z.style.transform = 'scale(' + k + ') translate(' + (-x0 * 100) + '%,' + (-y0 * 100) + '%)';
+  wrap.style.height = (wrap.clientWidth * (frameH() / frameW()) * (y1 - y0) * k) + 'px';
+}
 
 function drawOverlay() {
   if (!ART) return;
@@ -303,15 +380,16 @@ function drawOverlay() {
   }).join('');
   bindDrag();
   updateArtPreview();
+  applyZoom();
 }
 
 function updateArtPreview() {
-  const img = $('screen');
-  if (!ART || !img.naturalWidth) return;
+  if (!ART || !frameW()) return;
+  const src = frameSrc(), iw = frameW(), ih = frameH();
   $('artPrev').querySelectorAll('canvas').forEach((cv, i) => {
-    const r = artRect(SLOTS[i].key, img.naturalWidth, img.naturalHeight);
+    const r = artRect(SLOTS[i].key, iw, ih);
     cv.width = 192; cv.height = 128;
-    cv.getContext('2d').drawImage(img, r.x, r.y, r.w, r.h, 0, 0, 192, 128);
+    cv.getContext('2d').drawImage(src, r.x, r.y, r.w, r.h, 0, 0, 192, 128);
   });
 }
 
@@ -319,7 +397,7 @@ let drag = null;
 function bindDrag() {
   $('ov').querySelectorAll('.box.art').forEach(el => {
     el.addEventListener('pointerdown', ev => {
-      const box = $('screen').getBoundingClientRect();
+      const box = frameSrc().getBoundingClientRect();
       if (!box.width) return;
       const key = el.dataset.key;
       $('calSlot').value = key;
@@ -350,15 +428,14 @@ function bindDrag() {
 }
 
 async function judge() {
-  const img = $('screen');
-  if (!img.naturalWidth) { $('status').textContent = '先に画像を取得してください。'; return; }
+  if (!frameW()) { $('status').textContent = '先に画像を取得してください。'; return; }
+  const src = frameSrc(), iw = frameW(), ih = frameH();
   $('status').textContent = '判定中…';
   try {
     const qs = SLOTS.map(s => {
-      const r = artRect(s.key, img.naturalWidth, img.naturalHeight);
-      const e = extract(img, r);
-      const m = extractMana(img, manaRect(s.key, img.naturalWidth, img.naturalHeight),
-                            img.naturalWidth, img.naturalHeight);
+      const r = artRect(s.key, iw, ih);
+      const e = extract(src, r);
+      const m = extractMana(src, manaRect(s.key, iw, ih), iw, ih);
       return { key: s.key, gray: e.gray, color: e.color, mana: m, preview: e.preview };
     });
     const res = await recognize(qs, $('hero').value, false);
@@ -388,6 +465,7 @@ async function judge() {
 
 /// 闘技場ページの #text= はカンマ区切りで複数指定できる
 const HS_URL = 'https://hsreplay.net/ja/arena/cards/#text=';
+const HS_SUFFIX = '&view=advanced';
 let PICKED = [];
 
 function bindPicks() {
@@ -412,7 +490,9 @@ function updateGo() {
 
 $('go').onclick = () => {
   const names = PICKED.filter(Boolean);
-  if (names.length) window.open(HS_URL + encodeURIComponent(names.join(',')), '_blank');
+  if (names.length) {
+    window.open(HS_URL + encodeURIComponent(names.join(',')) + HS_SUFFIX, '_blank');
+  }
 };
 
 function syncCal() {
@@ -431,6 +511,17 @@ function syncCal() {
   saveArt(); syncCal();
 }));
 $('calSlot').onchange = syncCal;
+$('zoomOn').onchange = applyZoom;
+window.addEventListener('resize', applyZoom);
+$('flip').onchange = () => {
+  FLIP = $('flip').checked;
+  applyFlip();
+  saveArt();
+  if (frameW()) {
+    $('status').textContent = '接続済み  ' + frameW() + '×' + frameH() +
+      (FLIP ? '  （180°補正中）' : '');
+  }
+};
 $('copyAll').onclick = () => {
   // 大きさだけ揃える。X はカードごとに違うので維持する。
   const a = ART[$('calSlot').value];
@@ -455,6 +546,7 @@ $('host').value = localStorage.getItem('arenaHost') || '';
 $('hero').value = localStorage.getItem('arenaHero') || '';
 
 loadArt().then(() => {
+  $('flip').checked = FLIP;
   syncCal();
   if ($('host').value) refresh();
 });

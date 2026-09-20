@@ -21,8 +21,12 @@ button.primary{background:#238636;border-color:#238636}
 #drop{border:2px dashed #3d444d;border-radius:14px;padding:26px;text-align:center;
   color:#9da7b3;cursor:pointer;background:#10151c}
 #drop.hot{border-color:#238636;background:#0f1c14;color:#3fb950}
-#preview{max-width:100%;border-radius:10px;display:block;background:#000}
-#stage{position:relative;display:none;margin-top:10px;width:-moz-fit-content;width:fit-content}
+#preview,#view{max-width:100%;border-radius:10px;display:block;background:#000;
+  pointer-events:none;-webkit-touch-callout:none;-webkit-user-drag:none}
+#view[hidden],#preview[hidden]{display:none}
+#stage{position:relative;display:none;margin-top:10px;width:-moz-fit-content;width:fit-content;
+  -webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+#zoom{position:relative;transform-origin:0 0}
 #ov{position:absolute;inset:0;pointer-events:none}
 .box{position:absolute;border:2px solid rgba(240,136,62,.5);border-radius:3px}
 .box.art{border-color:#3fb950;pointer-events:auto;cursor:move;touch-action:none}
@@ -72,6 +76,7 @@ summary{cursor:pointer;font-weight:700}
 #hits div{padding:9px 11px;cursor:pointer;font-size:13px;border-bottom:1px solid #21262d}
 #hits div:hover{background:#21262d}
 .wrap{position:relative}
+.flipRow{display:flex;align-items:center;gap:8px;font-size:13px;color:#f0f3f6}
 #alert{display:none;background:#2d1618;border:1px solid #a4232a;color:#ffb4b0;
   border-radius:10px;padding:12px 14px;margin:10px 0;font-size:14px;line-height:1.7}
 #alert code{background:#0d1117;padding:2px 6px;border-radius:4px}
@@ -97,8 +102,11 @@ summary{cursor:pointer;font-weight:700}
   <span class="hint">PNG / JPEG / WEBP</span></div>
 <input type="file" id="file" accept="image/png,image/jpeg,image/webp" hidden>
 <div id="stage">
-  <img id="preview" alt="">
-  <div id="ov"></div>
+  <div id="zoom">
+    <img id="preview" alt="">
+    <canvas id="view" hidden></canvas>
+    <div id="ov"></div>
+  </div>
 </div>
   <p class="hint" id="ovHint" style="display:none">
   緑の枠が認識に使うアート範囲です。<b>枠をドラッグで移動、右下の丸でサイズ変更</b>。
@@ -141,6 +149,14 @@ summary{cursor:pointer;font-weight:700}
     <span>Y %</span><input type="range" id="ay" min="0" max="95" step="0.1"><b id="ayv"></b>
     <span>幅 %</span><input type="range" id="aw" min="2" max="100" step="0.1"><b id="awv"></b>
     <span>高さ %</span><input type="range" id="ah" min="2" max="100" step="0.1"><b id="ahv"></b>
+  </div>
+  <div class="row">
+    <label class="flipRow"><input type="checkbox" id="zoomOn" checked>
+      カード部分だけを拡大して調整する</label>
+  </div>
+  <div class="row">
+    <label class="flipRow"><input type="checkbox" id="flip" checked>
+      配信が上下逆のときに ON（180°補正）</label>
   </div>
   <div class="row">
     <select id="calSlot" aria-label="調整する枠">
@@ -200,10 +216,35 @@ function extractMana(src, r, iw, ih) {
 let ART = null;
 let saveTimer = null;
 
+// 配信が 180° ひっくり返る場合の補正。表示も切り出しもこの補正後の画像を見る。
+let FLIP = true;
+
+function applyFlip() {
+  const img = $('preview'), cv = $('view');
+  if (!IMG) return;
+  if (FLIP) {
+    cv.width = IMG.naturalWidth;
+    cv.height = IMG.naturalHeight;
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+    cx.translate(cv.width, cv.height);
+    cx.rotate(Math.PI);
+    cx.drawImage(IMG, 0, 0);
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  cv.hidden = !FLIP;
+  img.hidden = FLIP;
+}
+
+function frameSrc() {
+  return FLIP ? $('view') : IMG;
+}
+
 async function loadArt() {
   try {
     const j = await (await fetch('/api/calibration')).json();
     if (j.ok && j.art) ART = j.art;
+    if (j.ok) FLIP = !!j.flip;
   } catch (e) { /* サーバに届かない場合は後で既定値 */ }
   if (!ART) {
     ART = { left:   { x: 0.167, y: 0.115, w: 0.092, h: 0.054 },
@@ -216,7 +257,7 @@ function saveArt() {
   saveTimer = setTimeout(() => {
     fetch('/api/calibration', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ art: ART })
+      body: JSON.stringify({ art: ART, flip: FLIP })
     }).catch(() => {});
   }, 400);
 }
@@ -303,7 +344,9 @@ function loadFile(f) {
       IMG = im;
       $('preview').src = im.src;
       $('stage').style.display = 'block';
-      $('status').textContent = '読み込み完了  ' + im.naturalWidth + '×' + im.naturalHeight;
+      applyFlip();
+      $('status').textContent = '読み込み完了  ' + im.naturalWidth + '×' + im.naturalHeight +
+        (FLIP ? '  （180°補正中）' : '');
       drawOverlay();
     };
     im.src = fr.result;
@@ -329,6 +372,34 @@ document.addEventListener('paste', e => {
 document.querySelectorAll('input[name=mode]').forEach(r =>
   r.addEventListener('change', () => { $('out').innerHTML = ''; drawOverlay(); }));
 
+// 長押しの保存メニューが出ると枠をドラッグできない
+$('stage').addEventListener('contextmenu', e => e.preventDefault());
+
+/// 3枚の枠を囲む範囲だけを拡大する。座標は getBoundingClientRect が
+/// 変形後の値を返すので、ドラッグの計算はそのままで正しく動く。
+function applyZoom() {
+  const z = $('zoom'), stage = $('stage');
+  if (!ART || !IMG || !$('zoomOn').checked || mode() !== 'shot') {
+    z.style.transform = '';
+    stage.style.height = '';
+    return;
+  }
+  let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+  SLOTS.forEach(s => {
+    const a = ART[s.key], m = manaRect(s.key);
+    x0 = Math.min(x0, a.x, m.x); y0 = Math.min(y0, a.y, m.y);
+    x1 = Math.max(x1, a.x + a.w, m.x + m.w);
+    y1 = Math.max(y1, a.y + a.h, m.y + m.h);
+  });
+  const pad = 0.015;
+  x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad);
+  x1 = Math.min(1, x1 + pad); y1 = Math.min(1, y1 + pad);
+  const k = 1 / Math.max(x1 - x0, 0.02);
+  z.style.transform = 'scale(' + k + ') translate(' + (-x0 * 100) + '%,' + (-y0 * 100) + '%)';
+  const w = $('preview').clientWidth || IMG.naturalWidth;
+  stage.style.height = (w * (IMG.naturalHeight / IMG.naturalWidth) * (y1 - y0) * k) + 'px';
+}
+
 // ---------- アート枠のオーバーレイ ----------
 function drawOverlay() {
   const on = IMG && mode() === 'shot' && ART;
@@ -349,14 +420,16 @@ function drawOverlay() {
   }).join('');
   bindDrag();
   updateArtPreview();
+  applyZoom();
 }
 
 function updateArtPreview() {
   if (!IMG || !ART) return;
+  const src = frameSrc();
   $('artPrev').querySelectorAll('canvas').forEach((cv, i) => {
     const r = artRect(SLOTS[i].key, IMG.naturalWidth, IMG.naturalHeight);
     cv.width = 192; cv.height = 128;
-    cv.getContext('2d').drawImage(IMG, r.x, r.y, r.w, r.h, 0, 0, 192, 128);
+    cv.getContext('2d').drawImage(src, r.x, r.y, r.w, r.h, 0, 0, 192, 128);
   });
 }
 
@@ -364,7 +437,7 @@ let drag = null;
 function bindDrag() {
   $('ov').querySelectorAll('.box.art').forEach(el => {
     el.addEventListener('pointerdown', ev => {
-      const box = $('preview').getBoundingClientRect();
+      const box = ($('view').hidden ? $('preview') : $('view')).getBoundingClientRect();
       if (!box.width) return;
       const key = el.dataset.key;
       $('calSlot').value = key;
@@ -435,15 +508,16 @@ $('run').onclick = async () => {
   $('out').innerHTML = '';
   try {
     let qs;
+    const src = frameSrc();
     if (mode() === 'art') {
-      const e = extract(IMG, { x: 0, y: 0, w: IMG.naturalWidth, h: IMG.naturalHeight });
+      const e = extract(src, { x: 0, y: 0, w: IMG.naturalWidth, h: IMG.naturalHeight });
       qs = [{ key: 'art', label: 'アート画像', gray: e.gray, color: e.color,
               preview: e.preview, grayArr: e.grayArr }];
     } else {
       qs = SLOTS.map(s => {
         const r = artRect(s.key, IMG.naturalWidth, IMG.naturalHeight);
-        const e = extract(IMG, r);
-        const m = extractMana(IMG, manaRect(s.key, IMG.naturalWidth, IMG.naturalHeight),
+        const e = extract(src, r);
+        const m = extractMana(src, manaRect(s.key, IMG.naturalWidth, IMG.naturalHeight),
                               IMG.naturalWidth, IMG.naturalHeight);
         return { key: s.key, label: s.label, gray: e.gray, color: e.color, mana: m,
                  preview: e.preview, grayArr: e.grayArr };
@@ -582,6 +656,14 @@ function syncCal() {
   saveArt(); syncCal(); drawOverlay();
 }));
 $('calSlot').onchange = () => { syncCal(); drawOverlay(); };
+$('zoomOn').onchange = applyZoom;
+window.addEventListener('resize', applyZoom);
+$('flip').onchange = () => {
+  FLIP = $('flip').checked;
+  applyFlip();
+  saveArt();
+  drawOverlay();
+};
 $('copyAll').onclick = () => {
   // 大きさだけ揃える。X はカードごとに違うので維持する。
   const a = ART[$('calSlot').value];
@@ -600,7 +682,7 @@ $('resetCal').onclick = async () => {
   syncCal(); drawOverlay();
 };
 
-loadArt().then(() => { syncCal(); drawOverlay(); });
+loadArt().then(() => { $('flip').checked = FLIP; syncCal(); drawOverlay(); });
 
 fetch('/api/info').then(r => r.json()).then(j => {
   $('info').textContent = j.ok

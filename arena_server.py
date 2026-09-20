@@ -328,19 +328,28 @@ def default_art():
 def load_art():
     try:
         with open(CALIB_PATH, encoding='utf-8') as f:
-            saved = json.load(f).get('art') or {}
+            saved = json.load(f)
     except (OSError, ValueError):
         return default_art()
     art = default_art()
     for k in SLOT_KEYS:
-        v = saved.get(k)
+        v = (saved.get('art') or {}).get(k)
         if isinstance(v, dict) and all(isinstance(v.get(f), (int, float))
                                        for f in ('x', 'y', 'w', 'h')):
             art[k] = {f: float(v[f]) for f in ('x', 'y', 'w', 'h')}
     return art
 
 
-def save_art(art):
+def load_flip():
+    """配信が 180° ひっくり返っているか。iPad の向きによって起きる。"""
+    try:
+        with open(CALIB_PATH, encoding='utf-8') as f:
+            return bool(json.load(f).get('flip', True))
+    except (OSError, ValueError):
+        return True
+
+
+def save_art(art, flip=None):
     clean = default_art()
     for k in SLOT_KEYS:
         v = (art or {}).get(k)
@@ -348,9 +357,10 @@ def save_art(art):
             for f in ('x', 'y', 'w', 'h'):
                 if isinstance(v.get(f), (int, float)):
                     clean[k][f] = round(float(v[f]), 4)
+    payload = {'art': clean, 'flip': bool(load_flip() if flip is None else flip)}
     with open(CALIB_PATH, 'w', encoding='utf-8') as f:
-        json.dump({'art': clean}, f, ensure_ascii=False, indent=1)
-    return clean
+        json.dump(payload, f, ensure_ascii=False, indent=1)
+    return payload
 
 
 # ------------------------------------------------------------------ 照合
@@ -585,7 +595,7 @@ class Handler(SimpleHTTPRequestHandler):
             if u.path == '/api/info':
                 return self._info()
             if u.path == '/api/calibration':
-                return self._json({'ok': True, 'art': load_art()})
+                return self._json({'ok': True, 'art': load_art(), 'flip': load_flip()})
             if u.path == '/api/cards':
                 return self._cards(q)
             if u.path == '/api/thumb':
@@ -672,8 +682,10 @@ class Handler(SimpleHTTPRequestHandler):
         u = urlparse(self.path)
         try:
             if u.path == '/api/calibration':
-                art = save_art(self._body().get('art'))
-                return self._json({'ok': True, 'art': art})
+                body = self._body()
+                saved = save_art(body.get('art'), body.get('flip'))
+                return self._json({'ok': True, 'art': saved['art'],
+                                   'flip': saved['flip']})
             if u.path != '/api/recognize':
                 return self._json({'ok': False, 'error': 'not found'}, 404)
             body = self._body()

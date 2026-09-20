@@ -33,13 +33,14 @@ except ImportError:
 
 # サムネの大きさは認識側と一致していなければならない
 try:
-    from arena_server import TG, TC
+    from arena_server import TG, TC, MANA_TW, MANA_TH
 except ImportError:
-    TG, TC = 64, 16
+    TG, TC, MANA_TW, MANA_TH = 64, 16, 28, 32
 
 DB_PATH = 'arena_features.sqlite3'
 CACHE_PATH = 'arena_stage1.cache'
 CARDS_URL = 'https://api.hearthstonejson.com/v1/latest/{loc}/cards.collectible.json'
+RENDER_URL = 'https://art.hearthstonejson.com/v1/render/latest/{loc}/256x/{id}.png'
 ART_URL = {
     '256x': 'https://art.hearthstonejson.com/v1/256x/{id}.jpg',
     '512x': 'https://art.hearthstonejson.com/v1/512x/{id}.jpg',
@@ -48,6 +49,11 @@ ART_URL = {
 SKIP_SETS = {'HERO_SKINS'}
 SKIP_TYPES = {'HERO', 'ENCHANTMENT'}
 UA = {'User-Agent': 'ArenaAssistant/build'}
+
+# カード全体に対するマナ結晶の位置。レンダー画像から実測した。
+GEM_BOX = (0.020, 0.040, 0.235, 0.215)
+COSTS = list(range(0, 11))
+PER_COST = 14
 
 
 def schema(con):
@@ -66,6 +72,8 @@ def schema(con):
         id TEXT PRIMARY KEY, reason TEXT, tries INTEGER DEFAULT 1)''')
     con.execute('''CREATE TABLE IF NOT EXISTS meta (
         k TEXT PRIMARY KEY, v TEXT)''')
+    con.execute('''CREATE TABLE IF NOT EXISTS mana (
+        cost INTEGER PRIMARY KEY, w INTEGER, h INTEGER, feat BLOB NOT NULL)''')
     return con
 
 
@@ -125,6 +133,70 @@ def fetch_one(card, src):
         return card, None, None, '%s: %s' % (type(e).__name__, e)
 
 
+def gem_feature(card_id, locale):
+    """カードレンダーからマナ結晶を切り出し、平均0分散1へ規格化する。"""
+    im = Image.open(io.BytesIO(get(RENDER_URL.format(loc=locale, id=card_id))))
+    im.load()
+    if im.mode == 'RGBA':
+        bg = Image.new('RGB', im.size, (0, 0, 0))
+        bg.paste(im, mask=im.split()[-1])
+        im = bg
+    else:
+        im = im.convert('RGB')
+    w, h = im.size
+    gem = im.crop((int(GEM_BOX[0] * w), int(GEM_BOX[1] * h),
+                   int(GEM_BOX[2] * w), int(GEM_BOX[3] * h)))
+    small = gem.convert('L').resize((MANA_TW, MANA_TH), Image.LANCZOS)
+    a = [float(v) for v in small.tobytes()]
+    m = sum(a) / len(a)
+    sd = (sum((x - m) ** 2 for x in a) / len(a)) ** 0.5 + 1e-6
+    return [(x - m) / sd for x in a]
+
+
+def build_mana(con, cards, locale, workers):
+    """コストごとの平均テンプレートを作る。認識時の候補絞り込みに使う。"""
+    import struct
+    from collections import defaultdict
+
+    by_cost = defaultdict(list)
+    for c in cards:
+        if c['cost'] in COSTS and len(by_cost[c['cost']]) < PER_COST:
+            by_cost[c['cost']].append(c['id'])
+
+    todo = [(cost, cid) for cost, ids in by_cost.items() for cid in ids]
+    print('マナ結晶のテンプレートを作成中（%d 枚）...' % len(todo))
+
+    def one(item):
+        cost, cid = item
+        try:
+            return cost, gem_feature(cid, locale)
+        except Exception:  # noqa: BLE001
+            return cost, None
+
+    acc = defaultdict(list)
+    with ThreadPoolExecutor(max(1, workers)) as ex:
+        for cost, f in ex.map(one, todo):
+            if f:
+                acc[cost].append(f)
+
+    n = 0
+    for cost, feats in sorted(acc.items()):
+        if len(feats) < 4:
+            continue
+        avg = [sum(col) / len(col) for col in zip(*feats)]
+        m = sum(avg) / len(avg)
+        sd = (sum((x - m) ** 2 for x in avg) / len(avg)) ** 0.5 + 1e-6
+        avg = [(x - m) / sd for x in avg]
+        con.execute('INSERT OR REPLACE INTO mana VALUES(?,?,?,?)',
+                    (cost, MANA_TW, MANA_TH,
+                     struct.pack('<%df' % len(avg), *avg)))
+        n += 1
+    con.commit()
+    print('  テンプレート %d 種（コスト %s）'
+          % (n, ', '.join(str(c) for c in sorted(acc) if len(acc[c]) >= 4)))
+    return n
+
+
 def main():
     ap = argparse.ArgumentParser(description='カード特徴DBを作る')
     ap.add_argument('--db', default=DB_PATH)
@@ -136,6 +208,8 @@ def main():
     ap.add_argument('--retry-failed', action='store_true',
                     help='前回失敗したカードだけ再試行する')
     ap.add_argument('--rebuild', action='store_true', help='DBを消して最初から作る')
+    ap.add_argument('--mana-only', action='store_true',
+                    help='マナコストのテンプレートだけを作り直す')
     args = ap.parse_args()
 
     if args.rebuild and os.path.exists(args.db):
@@ -155,6 +229,11 @@ def main():
         'SELECT id FROM cards WHERE art_src=?', (args.src,))}
     failed = {r[0]: r[1] for r in con.execute('SELECT id,reason FROM failures')}
 
+    if args.mana_only:
+        build_mana(con, cards, args.locale, args.workers)
+        con.close()
+        return 0
+
     if args.retry_failed:
         todo = [c for c in cards if c['id'] in failed]
         print('再試行対象: %d 枚' % len(todo))
@@ -168,6 +247,8 @@ def main():
     print('登録済み %d 枚 / 今回処理 %d 枚' % (len(done), len(todo)))
     if not todo:
         print('すべて登録済みです。')
+        if not con.execute('SELECT COUNT(*) FROM mana').fetchone()[0]:
+            build_mana(con, cards, args.locale, args.workers)
         _summary(con, total, 0, skipped, 0, 0.0, args)
         return 0
 
@@ -214,6 +295,8 @@ def main():
         con.commit()
 
     print()
+    if not con.execute('SELECT COUNT(*) FROM mana').fetchone()[0]:
+        build_mana(con, cards, args.locale, args.workers)
     _summary(con, total, ok, skipped, ng, time.time() - t0, args)
     return 0
 
@@ -232,6 +315,7 @@ def _flush(con, pending):
 def _summary(con, total, ok, skipped, ng, secs, args):
     have = con.execute('SELECT COUNT(*) FROM cards').fetchone()[0]
     fails = con.execute('SELECT COUNT(*) FROM failures').fetchone()[0]
+    mana = con.execute('SELECT COUNT(*) FROM mana').fetchone()[0]
     size = os.path.getsize(args.db) if os.path.exists(args.db) else 0
     print('=' * 52)
     print('  総カード数   : %d' % total)
@@ -239,6 +323,7 @@ def _summary(con, total, ok, skipped, ng, secs, args):
     print('  スキップ     : %d  (登録済み・今回対象外)' % skipped)
     print('  今回失敗     : %d' % ng)
     print('  DB登録済み   : %d' % have)
+    print('  マナテンプレート : %d 種' % mana)
     print('  未解決の失敗 : %d' % fails)
     print('  処理時間     : %.1f 秒' % secs)
     print('  DBサイズ     : %.1f MB  (%s)' % (size / 1e6, os.path.abspath(args.db)))

@@ -91,6 +91,20 @@ def slot_query(im, rect):
     return A.query_descriptors(g, c)
 
 
+def slot_mana(im, rect):
+    """マナ結晶はアート枠からの相対位置で求める。"""
+    r = A.MANA_REL
+    w, h = im.size
+    x0 = (rect['x'] + r['x'] * rect['w']) * w
+    y0 = (rect['y'] + r['y'] * rect['h']) * h
+    x1 = x0 + r['w'] * rect['w'] * w
+    y1 = y0 + r['h'] * rect['h'] * h
+    if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
+        return b''
+    gem = im.crop((int(x0), int(y0), int(x1), int(y1)))
+    return gem.convert('L').resize((A.MANA_TW, A.MANA_TH), Image.LANCZOS).tobytes()
+
+
 def judge(host, hero, art):
     t0 = time.time()
     try:
@@ -103,12 +117,15 @@ def judge(host, hero, art):
 
     picks = []
     for key, label in SLOTS:
-        r = A.recognize(slot_query(im, art[key]), hero, False, '')
+        rect = art[key]
+        cost, margin = A.classify_cost(slot_mana(im, rect))
+        r = A.recognize(slot_query(im, rect), hero, False, '', cost)
         cands = r.get('candidates') or []
         head = {'ok': '一致', 'uncertain': '判定不確実',
                 'nomatch': '特定できず', 'empty': '候補なし'}[r['status']]
+        mana = ('マナ %d' % cost) if cost is not None else 'マナ不明'
         print()
-        print('%s  [%s]  1位と2位の差 %.3f' % (label, head, r.get('gap', 0)))
+        print('%s  [%s]  %s  1位の差 %.3f' % (label, head, mana, r.get('gap', 0)))
         for c in cands[:3]:
             print('   %d. %-24s %.3f   ssim %.3f edge %.3f color %.3f'
                   % (c['rank'], c['name'], c['finalScore'],

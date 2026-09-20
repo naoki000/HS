@@ -30,6 +30,7 @@ button.primary{background:#238636;border-color:#238636;flex:1}
 .box.art u{position:absolute;right:-10px;bottom:-10px;width:20px;height:20px;
   background:#3fb950;border:2px solid #0d1117;border-radius:50%;
   cursor:nwse-resize;touch-action:none}
+.box.mana{border-color:#1f6feb;border-style:dashed}
 .artPrev{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
 .artPrev figure{margin:0}
 .artPrev figcaption{font-size:11px;color:#9da7b3;text-align:center;margin-bottom:4px}
@@ -38,6 +39,8 @@ button.primary{background:#238636;border-color:#238636;flex:1}
 .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
 .card{background:#151b23;border:1px solid #30363d;border-radius:12px;padding:10px}
 .card h2{font-size:13px;margin:0 0 8px;color:#9da7b3}
+.card h2 .mana{display:inline-block;background:#1f6feb;color:#fff;border-radius:50%;
+  width:18px;height:18px;line-height:18px;text-align:center;font-size:11px}
 .card img.q{width:100%;border-radius:6px;display:block;background:#000}
 .badge{display:inline-block;margin:8px 0 6px;font-size:11px;padding:3px 8px;border-radius:20px}
 .badge.ok{background:#12301c;color:#3fb950;border:1px solid #238636}
@@ -144,6 +147,33 @@ const SLOTS = [
 ];
 // サーバ側の PW/PH, GW*2/GH*2 と一致させること
 const PW = 48, PH = 32, CW = 12, CH = 8;
+// マナ結晶。アート枠からの相対位置で求める。サーバの MANA_REL と揃えること
+const MW = 28, MH = 32;
+const MANA_REL = { x: -0.391, y: -0.191, w: 0.393, h: 0.492 };
+
+function manaRect(key, iw, ih) {
+  const a = ART[key];
+  return {
+    x: (a.x + MANA_REL.x * a.w) * (iw || 1),
+    y: (a.y + MANA_REL.y * a.h) * (ih || 1),
+    w: MANA_REL.w * a.w * (iw || 1),
+    h: MANA_REL.h * a.h * (ih || 1)
+  };
+}
+function extractMana(src, r, iw, ih) {
+  if (r.x < 0 || r.y < 0 || r.x + r.w > iw || r.y + r.h > ih) return '';
+  const c = document.createElement('canvas');
+  c.width = MW; c.height = MH;
+  const cx = c.getContext('2d', { willReadFrequently: true });
+  cx.imageSmoothingQuality = 'high';
+  cx.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, MW, MH);
+  const d = cx.getImageData(0, 0, MW, MH).data;
+  const g = new Uint8Array(MW * MH);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    g[j] = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+  }
+  return toB64(g);
+}
 
 // 切り取り範囲はフレーム全体に対する比率。配信が全画面か分割表示かで
 // 位置が変わるため固定座標にしない。値はサーバに保存し iPad と共有する。
@@ -325,8 +355,11 @@ async function judge() {
   $('status').textContent = '判定中…';
   try {
     const qs = SLOTS.map(s => {
-      const e = extract(img, artRect(s.key, img.naturalWidth, img.naturalHeight));
-      return { key: s.key, gray: e.gray, color: e.color, preview: e.preview };
+      const r = artRect(s.key, img.naturalWidth, img.naturalHeight);
+      const e = extract(img, r);
+      const m = extractMana(img, manaRect(s.key, img.naturalWidth, img.naturalHeight),
+                            img.naturalWidth, img.naturalHeight);
+      return { key: s.key, gray: e.gray, color: e.color, mana: m, preview: e.preview };
     });
     const res = await recognize(qs, $('hero').value, false);
     PICKED = res.results.map(r => (r.candidates[0] || {}).name || '');
@@ -336,7 +369,9 @@ async function judge() {
         '" data-name="' + esc(c.name) + '">' +
         '<span class="nm">' + esc(c.name) + '</span>' +
         '<span class="sc">' + c.finalScore.toFixed(3) + '</span></li>').join('');
-      return '<section class="card"><h2>' + SLOTS[i].label + '</h2>' +
+      return '<section class="card"><h2>' + SLOTS[i].label +
+        (r.detectedCost !== null && r.detectedCost !== undefined
+          ? ' <span class="mana">' + r.detectedCost + '</span>' : '') + '</h2>' +
         '<img class="q" src="' + qs[i].preview + '" alt="">' +
         '<div class="badge ' + r.status + '">' + STATUS_LABEL[r.status] + '</div>' +
         (r.status === 'nomatch' ? '' : '<ol class="cands">' + list + '</ol>') +

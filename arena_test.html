@@ -32,6 +32,7 @@ button.primary{background:#238636;border-color:#238636}
 .box.art u{position:absolute;right:-9px;bottom:-9px;width:18px;height:18px;
   background:#3fb950;border:2px solid #0d1117;border-radius:50%;
   cursor:nwse-resize;touch-action:none}
+.box.mana{border-color:#1f6feb;border-style:dashed}
 .artPrev{display:none;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px;
   max-width:620px}
 .artPrev figure{margin:0}
@@ -166,6 +167,33 @@ const SLOTS = [
 ];
 // サーバ側の PW/PH, GW*2/GH*2 と一致させること
 const PW = 48, PH = 32, CW = 12, CH = 8;
+// マナ結晶。アート枠からの相対位置で求める。サーバの MANA_REL と揃えること
+const MW = 28, MH = 32;
+const MANA_REL = { x: -0.391, y: -0.191, w: 0.393, h: 0.492 };
+
+function manaRect(key, iw, ih) {
+  const a = ART[key];
+  return {
+    x: (a.x + MANA_REL.x * a.w) * (iw || 1),
+    y: (a.y + MANA_REL.y * a.h) * (ih || 1),
+    w: MANA_REL.w * a.w * (iw || 1),
+    h: MANA_REL.h * a.h * (ih || 1)
+  };
+}
+function extractMana(src, r, iw, ih) {
+  if (r.x < 0 || r.y < 0 || r.x + r.w > iw || r.y + r.h > ih) return '';
+  const c = document.createElement('canvas');
+  c.width = MW; c.height = MH;
+  const cx = c.getContext('2d', { willReadFrequently: true });
+  cx.imageSmoothingQuality = 'high';
+  cx.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, MW, MH);
+  const d = cx.getImageData(0, 0, MW, MH).data;
+  const g = new Uint8Array(MW * MH);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    g[j] = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+  }
+  return toB64(g);
+}
 
 // 切り取り範囲はフレーム全体に対する比率。配信が全画面か分割表示かで
 // 位置が変わるため固定座標にしない。値はサーバに保存し iPad と共有する。
@@ -311,7 +339,10 @@ function drawOverlay() {
   const sel = $('calSlot').value;
   $('ov').innerHTML = SLOTS.map(s => {
     const a = ART[s.key];
-    return '<div class="box art' + (s.key === sel ? ' on' : '') + '" data-key="' + s.key +
+    const m = manaRect(s.key);
+    return '<div class="box mana" style="left:' + (m.x * 100) + '%;top:' + (m.y * 100) +
+      '%;width:' + (m.w * 100) + '%;height:' + (m.h * 100) + '%"></div>' +
+      '<div class="box art' + (s.key === sel ? ' on' : '') + '" data-key="' + s.key +
       '" style="left:' + (a.x * 100) + '%;top:' + (a.y * 100) +
       '%;width:' + (a.w * 100) + '%;height:' + (a.h * 100) +
       '%"><i>' + s.label + '</i><u></u></div>';
@@ -410,14 +441,17 @@ $('run').onclick = async () => {
               preview: e.preview, grayArr: e.grayArr }];
     } else {
       qs = SLOTS.map(s => {
-        const e = extract(IMG, artRect(s.key, IMG.naturalWidth, IMG.naturalHeight));
-        return { key: s.key, label: s.label, gray: e.gray, color: e.color,
+        const r = artRect(s.key, IMG.naturalWidth, IMG.naturalHeight);
+        const e = extract(IMG, r);
+        const m = extractMana(IMG, manaRect(s.key, IMG.naturalWidth, IMG.naturalHeight),
+                              IMG.naturalWidth, IMG.naturalHeight);
+        return { key: s.key, label: s.label, gray: e.gray, color: e.color, mana: m,
                  preview: e.preview, grayArr: e.grayArr };
       });
     }
     const t0 = performance.now();
     const res = await recognize(
-      qs.map(q => ({ key: q.key, gray: q.gray, color: q.color })),
+      qs.map(q => ({ key: q.key, gray: q.gray, color: q.color, mana: q.mana || '' })),
       $('hero').value, true, CORRECT ? CORRECT.id : '');
     const ms = Math.round(performance.now() - t0);
     render(res, qs);
@@ -453,6 +487,9 @@ function render(res, qs) {
     return '<section class="slot" data-i="' + i + '">' +
       '<div class="slotHead"><h3>' + esc(q.label) + '</h3>' +
       '<span class="badge ' + r.status + '">' + STATUS_LABEL[r.status] + '</span>' +
+      (r.detectedCost !== null && r.detectedCost !== undefined
+        ? '<span class="hint">読み取ったマナ ' + r.detectedCost + '</span>'
+        : '<span class="hint">マナ不明</span>') +
       '<span class="hint">1位と2位の差 ' + r.gap.toFixed(3) + '</span></div>' +
       '<div class="cmp">' +
       '<figure><figcaption>Query（認識に使った画像）</figcaption>' +

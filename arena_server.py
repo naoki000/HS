@@ -69,6 +69,15 @@ CAL = {
 STAGE1_KEEP = 800      # Stage1 から Stage2 へ渡す枚数
 VARIANT_PROBE = 60     # 変種を決めるために全変種を試す上位枚数
 STAGE2_RETURN = 8      # クライアントへ返す件数
+
+# ---- マナコスト ----
+# 結晶の数字をテンプレート照合で読み、一致するカードを加点する。
+# 除外ではなく加点なのは、コストを誤認識しても正解を落とさないため。
+MANA_TW, MANA_TH = 28, 32
+# アート枠に対する結晶の位置。カードレンダーから実測した。
+MANA_REL = {'x': -0.391, 'y': -0.191, 'w': 0.393, 'h': 0.492}
+COST_BONUS = 0.030     # コストが一致した候補への加点
+COST_MIN_MARGIN = 0.02  # 実測で、この差があれば誤読ゼロ・採用率88%
 W_SSIM, W_EDGE, W_COLOR, W_PIXEL = 0.40, 0.30, 0.15, 0.15
 MIN_ACCEPT = 0.45      # これ未満は「特定できない」
 CLOSE_GAP = 0.030      # 1位と2位の差がこれ未満なら「判定不確実」
@@ -203,12 +212,54 @@ def build_index():
     return {
         'ids': ids, 'names': names, 'klass': klass, 'classes': classes,
         'cost': cost, 'ctype': ctype,
+        'costarr': np.array(cost, dtype=np.int32),
+        'mana': load_mana(),
         'gray': gray, 'color': color,
         'edge': np.clip(edge_map(gray.astype(np.float32)), 0, 255).astype(np.uint8),
         'coarse': coarse.astype(np.float32),
         'variants': vs,
         'byid': {c: i for i, c in enumerate(ids)},
     }
+
+
+def load_mana():
+    """コストごとの結晶テンプレート。無ければコスト判定を使わない。"""
+    try:
+        con = open_db()
+    except DBMissing:
+        return None
+    try:
+        rows = con.execute('SELECT cost,w,h,feat FROM mana ORDER BY cost').fetchall()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        con.close()
+    costs, vecs = [], []
+    for r in rows:
+        if r['w'] != MANA_TW or r['h'] != MANA_TH:
+            continue
+        v = np.frombuffer(r['feat'], dtype='<f4')
+        if v.size != MANA_TW * MANA_TH:
+            continue
+        costs.append(int(r['cost']))
+        vecs.append(v)
+    if not costs:
+        return None
+    return {'costs': np.array(costs, dtype=np.int32), 'mat': np.stack(vecs)}
+
+
+def classify_cost(gray_bytes):
+    """結晶の画像からコストを読む。確信が低ければ None を返す。"""
+    mana = index().get('mana')
+    if not mana or len(gray_bytes) != MANA_TW * MANA_TH:
+        return None, 0.0
+    q = znorm(np.frombuffer(gray_bytes, dtype=np.uint8).astype(np.float32))
+    sc = mana['mat'] @ q / q.size
+    o = np.argsort(-sc)
+    margin = float(sc[o[0]] - sc[o[1]]) if sc.size > 1 else 1.0
+    if margin < COST_MIN_MARGIN:
+        return None, margin
+    return int(mana['costs'][o[0]]), margin
 
 
 def _build_coarse(gray, color, vs):
@@ -331,7 +382,7 @@ def query_descriptors(gray_bytes, color_bytes):
     }
 
 
-def recognize(q, hero, want_debug, correct_id):
+def recognize(q, hero, want_debug, correct_id, cost_hint=None):
     t0 = time.time()
     log('      recognize 開始')
     idx = index()
@@ -400,6 +451,9 @@ def recognize(q, hero, want_debug, correct_id):
     rows = np.arange(m)
     best, parts = score(rows, kbest)
     bestv = np.full(m, kbest, dtype=np.int32)
+    if cost_hint is not None:
+        best = best + COST_BONUS * (idx['costarr'][cand] == cost_hint)
+        log('      コスト %d に加点 %.3f' % (cost_hint, COST_BONUS))
     log('      Stage2 完了  %.2fs  (合計 %.2fs)'
         % (time.time() - t_s1, time.time() - t0))
 
@@ -438,6 +492,7 @@ def recognize(q, hero, want_debug, correct_id):
 
     res = {'status': status, 'gap': round(float(gap), 4),
            'poolSize': int(pool.size), 'stage1Keep': int(keep),
+           'detectedCost': cost_hint,
            'candidates': cands}
 
     if correct_id and correct_id in idx['byid']:
@@ -558,6 +613,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(info, 503)
         idx = index()
         info.update({'cards': len(idx['ids']), 'variants': len(idx['variants']),
+                     'mana': int(idx['mana']['costs'].size) if idx.get('mana') else 0,
+                     'manaPatch': [MANA_TW, MANA_TH], 'manaRel': MANA_REL,
                      'bytes': os.path.getsize(DB_PATH)})
         return self._json(info)
 
@@ -641,9 +698,17 @@ class Handler(SimpleHTTPRequestHandler):
                 t1 = time.time()
                 qd = query_descriptors(gb, cb)
                 log('      query 変換 %.2fs' % (time.time() - t1))
+                cost_hint = None
+                mb = base64.b64decode(item.get('mana', '') or '')
+                if mb:
+                    cost_hint, margin = classify_cost(mb)
+                    log('      マナ読み取り %s (確信差 %.3f)'
+                        % ('コスト %d' % cost_hint if cost_hint is not None else '不明',
+                           margin))
                 r = recognize(qd, hero, debug,
                               str(item.get('correctId', '') or
-                                  body.get('correctId', '') or ''))
+                                  body.get('correctId', '') or ''),
+                              cost_hint)
                 top = (r.get('candidates') or [{}])[0]
                 log('  [%d/%d] %s -> %s %s  %.2fs'
                     % (n, len(queries), item.get('key', ''), r.get('status'),

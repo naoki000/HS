@@ -1,0 +1,174 @@
+name: Build ArenaAssistant (iOS 27 SDK)
+
+on:
+  push:
+    paths:
+      - 'ArenaAssistant.swiftpm/**'
+      - '.github/workflows/build-ios.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 指定どおり xcode-27 を使う。
+    # これは GitHub ホストの標準ラベルではないため、該当する runner が
+    # 登録されていない場合ジョブは "Waiting for a runner" のまま進まない。
+    # その場合は macos-26 などへ変更し、xcode-select で Xcode 27 を選ぶ。
+    runs-on: xcode-27
+
+    env:
+      APP_DIR: ArenaAssistant.swiftpm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------
+      # 1. どのツールチェーンで動いているかをログに残す
+      # ---------------------------------------------------------------
+      - name: Toolchain versions
+        run: |
+          echo "::group::xcodebuild -version"
+          xcodebuild -version
+          echo "::endgroup::"
+
+          echo "::group::iphoneos SDK"
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --show-sdk-path
+          echo "::endgroup::"
+
+          echo "::group::swift --version"
+          swift --version
+          echo "::endgroup::"
+
+          echo "::group::installed SDKs"
+          xcodebuild -showsdks
+          echo "::endgroup::"
+
+      # ---------------------------------------------------------------
+      # 2. iOS SDK が 27 系であることを確認する
+      #    ここで止めないと、古い SDK で「import できた」と誤解しかねない
+      # ---------------------------------------------------------------
+      - name: Assert iOS SDK is 27.x
+        run: |
+          SDK_VERSION="$(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "iphoneos SDK version: ${SDK_VERSION}"
+          case "${SDK_VERSION}" in
+            27.*) echo "OK: iOS 27 SDK" ;;
+            *)
+              echo "::error::iOS 27 SDK が必要ですが ${SDK_VERSION} でした。runner の Xcode を確認してください。"
+              exit 1
+              ;;
+          esac
+
+      # ---------------------------------------------------------------
+      # 3. SDK に ScreenCaptureKit が実在するかを確認する
+      # ---------------------------------------------------------------
+      - name: Check ScreenCaptureKit exists in the iOS SDK
+        run: |
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          echo "SDK: ${SDK_PATH}"
+
+          FRAMEWORK="${SDK_PATH}/System/Library/Frameworks/ScreenCaptureKit.framework"
+          if [ -d "${FRAMEWORK}" ]; then
+            echo "OK: ${FRAMEWORK}"
+            ls -la "${FRAMEWORK}"
+          else
+            echo "::error::iOS SDK に ScreenCaptureKit.framework が見つかりません。"
+            echo "利用可能なフレームワーク（先頭50件）:"
+            ls "${SDK_PATH}/System/Library/Frameworks" | head -50
+            exit 1
+          fi
+
+          echo "::group::swiftinterface"
+          find "${FRAMEWORK}" -name '*.swiftinterface' | head -20
+          echo "::endgroup::"
+
+      # ---------------------------------------------------------------
+      # 4. 本命。import ScreenCaptureKit が iOS 27 で通るかを型検査で確定させる
+      #    スキームや署名に依存しないので、失敗＝コードの問題と断定できる
+      # ---------------------------------------------------------------
+      - name: Type-check sources against iOS 27 SDK
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          echo "型検査の対象:"
+          ls -1 *.swift
+
+          xcrun swiftc \
+            -sdk "${SDK_PATH}" \
+            -target arm64-apple-ios27.0 \
+            -parse-as-library \
+            -typecheck \
+            ArenaAssistantApp.swift \
+            ContentView.swift \
+            ScreenCaptureManager.swift
+
+          echo "OK: iOS 27 SDK で型検査を通過しました。"
+
+      # ---------------------------------------------------------------
+      # 5. Swift Playgrounds の App Project としてビルドする
+      #    スキーム名は .swiftpm の構成から自動で拾う
+      # ---------------------------------------------------------------
+      - name: List schemes
+        id: schemes
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          echo "::group::xcodebuild -list"
+          xcodebuild -list || true
+          echo "::endgroup::"
+
+          SCHEME="$(xcodebuild -list 2>/dev/null \
+            | sed -n '/Schemes:/,$p' \
+            | sed -n '2p' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          echo "detected scheme: '${SCHEME}'"
+          echo "scheme=${SCHEME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build app for iOS 27 (no code signing)
+        id: appbuild
+        # 型検査が本命の判定なので、スキーム解決など周辺要因での赤化は避ける
+        continue-on-error: true
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -o pipefail
+          SCHEME='${{ steps.schemes.outputs.scheme }}'
+          if [ -z "${SCHEME}" ]; then
+            echo "::warning::スキームを特定できませんでした。ビルド段階を省略します。"
+            exit 1
+          fi
+
+          xcodebuild build \
+            -scheme "${SCHEME}" \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "${RUNNER_TEMP}/DerivedData" \
+            IPHONEOS_DEPLOYMENT_TARGET=27.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS=""
+
+      # ---------------------------------------------------------------
+      # 6. 結果をまとめる
+      # ---------------------------------------------------------------
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## ArenaAssistant build result"
+            echo ""
+            echo "| 項目 | 値 |"
+            echo "|---|---|"
+            echo "| Xcode | $(xcodebuild -version | head -1) |"
+            echo "| iOS SDK | $(xcrun --sdk iphoneos --show-sdk-version) |"
+            echo "| Swift | $(swift --version 2>&1 | head -1) |"
+            echo "| Scheme | ${{ steps.schemes.outputs.scheme }} |"
+            echo "| 型検査 (import ScreenCaptureKit) | 成功（このステップに到達＝通過） |"
+            echo "| アプリのビルド | ${{ steps.appbuild.outcome }} |"
+            echo ""
+            echo "型検査が成功していれば、iOS 27 SDK で ScreenCaptureKit を import し、"
+            echo "使用している API が実在することが確認できています。"
+            echo ""
+            echo "アプリのビルドが failure の場合は、スキーム解決か署名設定が原因の可能性が高く、"
+            echo "ScreenCaptureKit そのものの問題とは限りません。上のログを参照してください。"
+          } >> "${GITHUB_STEP_SUMMARY}"

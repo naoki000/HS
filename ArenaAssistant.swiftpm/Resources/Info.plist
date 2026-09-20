@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- アプリが前面にない間も取り込みを続けるために必要。
+	     Package.swift の additionalInfoPlistContentFilePath で参照する。
+	     既定では参照していない（その引数が使えるか未検証のため）。 -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>screen-capture</string>
+	</array>
+</dict>
+</plist>

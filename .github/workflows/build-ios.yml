@@ -149,7 +149,108 @@ jobs:
             CODE_SIGN_ENTITLEMENTS=""
 
       # ---------------------------------------------------------------
-      # 6. 結果をまとめる
+      # 6. ビルド成果物の .app を探す
+      #    プロダクト名は Package.swift の name（"Arena Assistant"）に
+      #    依存しスペースを含みうるため、名前を決め打ちせず検索で特定する
+      # ---------------------------------------------------------------
+      - name: Locate built .app
+        id: locate
+        if: steps.appbuild.outcome == 'success'
+        run: |
+          PRODUCTS="${RUNNER_TEMP}/DerivedData/Build/Products"
+
+          echo "::group::Build/Products の中身"
+          ls -la "${PRODUCTS}" 2>/dev/null || echo "(Products ディレクトリがありません)"
+          find "${PRODUCTS}" -maxdepth 2 -name '*.app' -type d 2>/dev/null || true
+          echo "::endgroup::"
+
+          # まず iphoneos 向けの成果物を優先して探す
+          APP_PATH="$(find "${PRODUCTS}" -maxdepth 2 -type d -name '*.app' -path '*-iphoneos/*' 2>/dev/null | head -n 1)"
+
+          # 見つからなければ DerivedData 全体を対象にする
+          if [ -z "${APP_PATH}" ]; then
+            APP_PATH="$(find "${RUNNER_TEMP}/DerivedData" -type d -name '*.app' 2>/dev/null | head -n 1)"
+          fi
+
+          if [ -z "${APP_PATH}" ]; then
+            echo "::error::ビルドは成功しましたが .app を特定できませんでした。"
+            echo "DerivedData 配下の .app 候補:"
+            find "${RUNNER_TEMP}/DerivedData" -name '*.app' 2>/dev/null | head -20
+            exit 1
+          fi
+
+          echo "found app: ${APP_PATH}"
+          echo "app-path=${APP_PATH}" >> "${GITHUB_OUTPUT}"
+
+          echo "::group::.app の中身"
+          ls -la "${APP_PATH}"
+          echo "::endgroup::"
+
+          # 実行バイナリが iOS arm64 かどうかを確認しておく
+          BIN_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${APP_PATH}/Info.plist" 2>/dev/null || true)"
+          if [ -n "${BIN_NAME}" ] && [ -f "${APP_PATH}/${BIN_NAME}" ]; then
+            echo "::group::バイナリ情報"
+            file "${APP_PATH}/${BIN_NAME}"
+            lipo -info "${APP_PATH}/${BIN_NAME}" 2>/dev/null || true
+            echo "::endgroup::"
+          fi
+
+      # ---------------------------------------------------------------
+      # 7. 未署名 IPA を組み立てる
+      #    IPA は Payload/ を含む単なる zip。署名は一切行わない
+      # ---------------------------------------------------------------
+      - name: Package unsigned IPA
+        id: ipa
+        if: steps.locate.outcome == 'success'
+        env:
+          APP_PATH: ${{ steps.locate.outputs.app-path }}
+        run: |
+          set -euo pipefail
+
+          STAGE="${RUNNER_TEMP}/ipa-stage"
+          IPA_PATH="${GITHUB_WORKSPACE}/ArenaAssistant-unsigned.ipa"
+
+          rm -rf "${STAGE}" "${IPA_PATH}"
+          mkdir -p "${STAGE}/Payload"
+
+          # ditto はシンボリックリンクや属性を保ったままコピーできる。
+          # .app のディレクトリ名は実行には影響しないため、要求どおりの名前に揃える。
+          ditto "${APP_PATH}" "${STAGE}/Payload/ArenaAssistant.app"
+
+          ( cd "${STAGE}" && zip -qry "${IPA_PATH}" Payload )
+
+          echo "ipa-path=${IPA_PATH}" >> "${GITHUB_OUTPUT}"
+
+          SIZE="$(du -h "${IPA_PATH}" | cut -f1)"
+          echo "ipa-size=${SIZE}" >> "${GITHUB_OUTPUT}"
+          echo "IPA: ${IPA_PATH} (${SIZE})"
+
+          echo "::group::IPA の中身（先頭40件）"
+          unzip -l "${IPA_PATH}" | head -40
+          echo "::endgroup::"
+
+          # Payload/ArenaAssistant.app/ が入っていることを確認する
+          if ! unzip -l "${IPA_PATH}" | grep -q 'Payload/ArenaAssistant.app/'; then
+            echo "::error::IPA に Payload/ArenaAssistant.app が含まれていません。"
+            exit 1
+          fi
+          echo "OK: Payload/ArenaAssistant.app を確認しました。"
+
+      # ---------------------------------------------------------------
+      # 8. Artifact として公開する
+      # ---------------------------------------------------------------
+      - name: Upload unsigned IPA
+        if: steps.ipa.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArenaAssistant-unsigned
+          path: ArenaAssistant-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      # ---------------------------------------------------------------
+      # 9. 結果をまとめる
       # ---------------------------------------------------------------
       - name: Summary
         if: always()
@@ -165,7 +266,25 @@ jobs:
             echo "| Scheme | ${{ steps.schemes.outputs.scheme }} |"
             echo "| 型検査 (import ScreenCaptureKit) | 成功（このステップに到達＝通過） |"
             echo "| アプリのビルド | ${{ steps.appbuild.outcome }} |"
+            echo "| .app の特定 | ${{ steps.locate.outcome }} |"
+            echo "| IPA の作成 | ${{ steps.ipa.outcome }} |"
             echo ""
+
+            if [ "${{ steps.ipa.outcome }}" = "success" ]; then
+              echo "### 未署名 IPA"
+              echo ""
+              echo "- ビルド元: \`${{ steps.locate.outputs.app-path }}\`"
+              echo "- サイズ: ${{ steps.ipa.outputs.ipa-size }}"
+              echo "- Artifact 名: **ArenaAssistant-unsigned**"
+              echo ""
+              echo "このページ下部の Artifacts から \`ArenaAssistant-unsigned\` をダウンロードできます。"
+              echo "展開すると \`ArenaAssistant-unsigned.ipa\` が入っています。"
+              echo ""
+              echo "> この IPA は**未署名**です。そのままでは実機にインストールできません。"
+              echo "> AltStore / SideStore などで署名してから転送してください。"
+              echo ""
+            fi
+
             echo "型検査が成功していれば、iOS 27 SDK で ScreenCaptureKit を import し、"
             echo "使用している API が実在することが確認できています。"
             echo ""

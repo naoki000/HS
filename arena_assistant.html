@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Arena Assistant</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0d1117;color:#f0f3f6}
+main{max-width:1000px;margin:auto;padding:16px}
+header{display:flex;align-items:baseline;gap:12px;margin-bottom:12px}
+h1{font-size:22px;margin:0}
+a{color:#58a6ff}
+.row{display:flex;gap:8px;margin:10px 0}
+input,select,button{font:inherit;border-radius:10px;border:1px solid #3d444d;padding:11px}
+input,select{background:#151b23;color:#fff;min-width:0}
+input[type=text],input:not([type]){flex:1}
+button{background:#21262d;color:#f0f3f6;font-weight:700;cursor:pointer}
+button.primary{background:#238636;border-color:#238636;flex:1}
+.status{font-size:13px;color:#9da7b3;min-height:20px;padding:4px 2px}
+.frame{position:relative;background:#000;border-radius:12px;overflow:hidden;margin-top:8px}
+#screen{display:block;width:100%;height:auto;min-height:120px}
+#ov{position:absolute;inset:0;pointer-events:none}
+.box{position:absolute;border:2px solid rgba(240,136,62,.55);border-radius:3px}
+.box.art{border-color:#3fb950;border-width:2px;pointer-events:auto;cursor:move;touch-action:none}
+.box.art.on{border-color:#58a6ff;box-shadow:0 0 0 2px rgba(88,166,255,.35)}
+.box.art i{position:absolute;top:-16px;left:-2px;font-style:normal;font-size:10px;
+  background:#3fb950;color:#000;padding:0 4px;border-radius:3px}
+.box.art u{position:absolute;right:-10px;bottom:-10px;width:20px;height:20px;
+  background:#3fb950;border:2px solid #0d1117;border-radius:50%;
+  cursor:nwse-resize;touch-action:none}
+.artPrev{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.artPrev figure{margin:0}
+.artPrev figcaption{font-size:11px;color:#9da7b3;text-align:center;margin-bottom:4px}
+.artPrev canvas{width:100%;height:auto;border-radius:7px;border:1px solid #30363d;
+  background:#000;display:block}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+.card{background:#151b23;border:1px solid #30363d;border-radius:12px;padding:10px}
+.card h2{font-size:13px;margin:0 0 8px;color:#9da7b3}
+.card img.q{width:100%;border-radius:6px;display:block;background:#000}
+.badge{display:inline-block;margin:8px 0 6px;font-size:11px;padding:3px 8px;border-radius:20px}
+.badge.ok{background:#12301c;color:#3fb950;border:1px solid #238636}
+.badge.uncertain{background:#2b2411;color:#d29922;border:1px solid #9e6a03}
+.badge.nomatch{background:#2d1618;color:#f85149;border:1px solid #a4232a}
+.cands{list-style:none;margin:0;padding:0;counter-reset:r}
+.cands li{display:flex;justify-content:space-between;gap:6px;font-size:13px;
+  padding:5px 0;border-top:1px solid #21262d}
+.cands li:first-child{border-top:0;font-weight:700}
+.cands li::before{counter-increment:r;content:counter(r) ".";color:#6e7781;margin-right:4px}
+.cands li{cursor:pointer}
+.cands li.pick{color:#58a6ff}
+#go{display:none;width:100%;background:#1f6feb;border-color:#1f6feb;margin-top:12px;padding:14px}
+#picked{font-size:13px;color:#9da7b3;margin-top:10px;line-height:1.7}
+.nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sc{color:#9da7b3;font-variant-numeric:tabular-nums}
+details{margin-top:14px;background:#151b23;border:1px solid #30363d;border-radius:12px;padding:10px 12px}
+summary{cursor:pointer;font-weight:700}
+.calibGrid{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;margin-top:10px}
+.calibGrid input{padding:0}
+.calibGrid b{font-variant-numeric:tabular-nums;font-size:12px;min-width:42px;text-align:right}
+.hint{font-size:12px;color:#9da7b3;line-height:1.6}
+#alert{display:none;background:#2d1618;border:1px solid #a4232a;color:#ffb4b0;
+  border-radius:10px;padding:12px 14px;margin:10px 0;font-size:14px;line-height:1.7}
+#alert code{background:#0d1117;padding:2px 6px;border-radius:4px}
+@media(max-width:620px){.cards{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>Arena Assistant</h1>
+  <a href="arena_test.html">検証ページ</a>
+</header>
+
+<div id="alert"></div>
+
+<div class="row">
+  <input id="host" placeholder="192.168.11.6 または http://192.168.11.6">
+  <button id="connect">接続</button>
+</div>
+
+<div class="row">
+  <select id="hero" aria-label="クラス">
+    <option value="">全クラス</option>
+    <option>DEATHKNIGHT</option><option>DEMONHUNTER</option><option>DRUID</option>
+    <option>HUNTER</option><option>MAGE</option><option>PALADIN</option>
+    <option>PRIEST</option><option>ROGUE</option><option>SHAMAN</option>
+    <option>WARLOCK</option><option>WARRIOR</option>
+  </select>
+  <button id="refresh">最新画像</button>
+  <button id="judge" class="primary">判定</button>
+</div>
+
+<div id="status" class="status">接続先を入力してください。</div>
+
+<div class="frame">
+  <img id="screen" alt="">
+  <div id="ov" hidden></div>
+</div>
+
+<div id="cards" class="cards"></div>
+<button id="go">HSReplay で3枚の勝率を見る</button>
+<div id="picked"></div>
+
+<details>
+  <summary>切り取り範囲の調整</summary>
+  <p class="hint">緑の枠が認識に使う範囲です。<b>枠をドラッグで移動、右下の丸でサイズ変更</b>。
+  左・中央・右はそれぞれ独立しています。カードの絵だけが入るよう合わせてください。
+  設定はサーバに保存され、検証ページと共有されます。</p>
+  <div class="calibGrid">
+    <span>X %</span><input type="range" id="ax" min="0" max="95" step="0.1"><b id="axv"></b>
+    <span>Y %</span><input type="range" id="ay" min="0" max="95" step="0.1"><b id="ayv"></b>
+    <span>幅 %</span><input type="range" id="aw" min="2" max="100" step="0.1"><b id="awv"></b>
+    <span>高さ %</span><input type="range" id="ah" min="2" max="100" step="0.1"><b id="ahv"></b>
+  </div>
+  <div class="row">
+    <select id="calSlot" aria-label="調整する枠">
+      <option value="left">左の枠</option>
+      <option value="middle">中央の枠</option>
+      <option value="right">右の枠</option>
+    </select>
+    <button id="copyAll">この枠を3枚に適用</button>
+    <button id="resetCal">初期値に戻す</button>
+  </div>
+  <div class="artPrev" id="artPrev">
+    <figure><figcaption>左</figcaption><canvas></canvas></figure>
+    <figure><figcaption>中央</figcaption><canvas></canvas></figure>
+    <figure><figcaption>右</figcaption><canvas></canvas></figure>
+  </div>
+</details>
+
+<p class="hint" id="info"></p>
+</main>
+
+<script>
+/* ==========================================================================
+   共通部（arena_test.html と同じ内容を保つこと）
+   ========================================================================== */
+const SLOTS = [
+  { key: 'left', label: '左' },
+  { key: 'middle', label: '中央' },
+  { key: 'right', label: '右' }
+];
+// サーバ側の PW/PH, GW*2/GH*2 と一致させること
+const PW = 48, PH = 32, CW = 12, CH = 8;
+
+// 切り取り範囲はフレーム全体に対する比率。配信が全画面か分割表示かで
+// 位置が変わるため固定座標にしない。値はサーバに保存し iPad と共有する。
+let ART = null;
+let saveTimer = null;
+
+async function loadArt() {
+  try {
+    const j = await (await fetch('/api/calibration')).json();
+    if (j.ok && j.art) ART = j.art;
+  } catch (e) { /* サーバに届かない場合は後で既定値 */ }
+  if (!ART) {
+    ART = { left:   { x: 0.167, y: 0.115, w: 0.092, h: 0.054 },
+            middle: { x: 0.341, y: 0.115, w: 0.092, h: 0.054 },
+            right:  { x: 0.523, y: 0.115, w: 0.092, h: 0.054 } };
+  }
+}
+function saveArt() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    fetch('/api/calibration', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ art: ART })
+    }).catch(() => {});
+  }, 400);
+}
+function artRect(key, iw, ih) {
+  const a = ART[key];
+  return { x: a.x * iw, y: a.y * ih, w: a.w * iw, h: a.h * ih };
+}
+function toB64(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return btoa(s);
+}
+function extract(src, r) {
+  const mid = document.createElement('canvas');
+  mid.width = PW * 4; mid.height = PH * 4;
+  const mc = mid.getContext('2d', { willReadFrequently: true });
+  mc.imageSmoothingEnabled = true; mc.imageSmoothingQuality = 'high';
+  mc.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, mid.width, mid.height);
+
+  const gc = document.createElement('canvas');
+  gc.width = PW; gc.height = PH;
+  const g2 = gc.getContext('2d', { willReadFrequently: true });
+  g2.imageSmoothingQuality = 'high';
+  g2.drawImage(mid, 0, 0, PW, PH);
+  const gd = g2.getImageData(0, 0, PW, PH).data;
+  const gray = new Uint8Array(PW * PH);
+  for (let i = 0, j = 0; i < gd.length; i += 4, j++) {
+    gray[j] = (0.299 * gd[i] + 0.587 * gd[i + 1] + 0.114 * gd[i + 2]) | 0;
+  }
+
+  const cc = document.createElement('canvas');
+  cc.width = CW; cc.height = CH;
+  const c2 = cc.getContext('2d', { willReadFrequently: true });
+  c2.imageSmoothingQuality = 'high';
+  c2.drawImage(mid, 0, 0, CW, CH);
+  const cd = c2.getImageData(0, 0, CW, CH).data;
+  const color = new Uint8Array(CW * CH * 3);
+  for (let i = 0, j = 0; i < cd.length; i += 4) {
+    color[j++] = cd[i]; color[j++] = cd[i + 1]; color[j++] = cd[i + 2];
+  }
+
+  const pv = document.createElement('canvas');
+  pv.width = 192; pv.height = 128;
+  pv.getContext('2d').drawImage(src, r.x, r.y, r.w, r.h, 0, 0, 192, 128);
+  return { gray: toB64(gray), color: toB64(color),
+           preview: pv.toDataURL('image/png'), grayArr: gray };
+}
+async function recognize(queries, hero, debug, correctId) {
+  const res = await fetch('/api/recognize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ queries, hero, debug: !!debug, correctId: correctId || '' })
+  });
+  const j = await res.json().catch(() => ({ ok: false, error: 'HTTP ' + res.status }));
+  if (!j.ok) throw new Error(j.error || ('HTTP ' + res.status));
+  return j;
+}
+const STATUS_LABEL = {
+  ok: '一致', uncertain: '判定不確実',
+  nomatch: '一致するカードを特定できませんでした', empty: '候補なし'
+};
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+/* ===================== 共通部ここまで ===================== */
+
+const $ = id => document.getElementById(id);
+
+function baseURL() {
+  let s = $('host').value.trim().replace(/\/+$/, '');
+  if (!s) return '';
+  if (!/^https?:\/\//i.test(s)) s = 'http://' + s;
+  return s;
+}
+function refresh() {
+  const b = baseURL();
+  if (!b) { $('status').textContent = '接続先を入力してください。'; return; }
+  localStorage.setItem('arenaHost', $('host').value.trim());
+  $('status').textContent = '取得中…';
+  $('screen').src = '/castframe?host=' + encodeURIComponent(b) + '&t=' + Date.now();
+}
+
+$('screen').addEventListener('load', () => {
+  $('status').textContent = '接続済み  ' +
+    $('screen').naturalWidth + '×' + $('screen').naturalHeight;
+  $('ov').hidden = false;
+  drawOverlay();
+});
+$('screen').addEventListener('error', () => {
+  $('status').textContent = '取得できません。IPとCast to Browserの配信を確認してください。';
+  $('ov').hidden = true;
+});
+
+function drawOverlay() {
+  if (!ART) return;
+  const sel = $('calSlot').value;
+  $('ov').innerHTML = SLOTS.map(s => {
+    const a = ART[s.key];
+    return '<div class="box art' + (s.key === sel ? ' on' : '') + '" data-key="' + s.key +
+      '" style="left:' + (a.x * 100) + '%;top:' + (a.y * 100) +
+      '%;width:' + (a.w * 100) + '%;height:' + (a.h * 100) +
+      '%"><i>' + s.label + '</i><u></u></div>';
+  }).join('');
+  bindDrag();
+  updateArtPreview();
+}
+
+function updateArtPreview() {
+  const img = $('screen');
+  if (!ART || !img.naturalWidth) return;
+  $('artPrev').querySelectorAll('canvas').forEach((cv, i) => {
+    const r = artRect(SLOTS[i].key, img.naturalWidth, img.naturalHeight);
+    cv.width = 192; cv.height = 128;
+    cv.getContext('2d').drawImage(img, r.x, r.y, r.w, r.h, 0, 0, 192, 128);
+  });
+}
+
+let drag = null;
+function bindDrag() {
+  $('ov').querySelectorAll('.box.art').forEach(el => {
+    el.addEventListener('pointerdown', ev => {
+      const box = $('screen').getBoundingClientRect();
+      if (!box.width) return;
+      const key = el.dataset.key;
+      $('calSlot').value = key;
+      drag = {
+        key, box, from: Object.assign({}, ART[key]),
+        mode: ev.target.tagName === 'U' ? 'size' : 'move',
+        px: ev.clientX, py: ev.clientY
+      };
+      el.setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+    });
+    el.addEventListener('pointermove', ev => {
+      if (!drag) return;
+      const dx = (ev.clientX - drag.px) / drag.box.width;
+      const dy = (ev.clientY - drag.py) / drag.box.height;
+      const a = drag.from;
+      const cl = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+      const rd = v => Math.round(v * 10000) / 10000;
+      ART[drag.key] = drag.mode === 'move'
+        ? { x: rd(cl(a.x + dx, 0, 1 - a.w)), y: rd(cl(a.y + dy, 0, 1 - a.h)), w: a.w, h: a.h }
+        : { x: a.x, y: a.y,
+            w: rd(cl(a.w + dx, 0.02, 1 - a.x)), h: rd(cl(a.h + dy, 0.02, 1 - a.y)) };
+      saveArt(); syncCal();
+      ev.preventDefault();
+    });
+    el.addEventListener('pointerup', () => { drag = null; });
+  });
+}
+
+async function judge() {
+  const img = $('screen');
+  if (!img.naturalWidth) { $('status').textContent = '先に画像を取得してください。'; return; }
+  $('status').textContent = '判定中…';
+  try {
+    const qs = SLOTS.map(s => {
+      const e = extract(img, artRect(s.key, img.naturalWidth, img.naturalHeight));
+      return { key: s.key, gray: e.gray, color: e.color, preview: e.preview };
+    });
+    const res = await recognize(qs, $('hero').value, false);
+    PICKED = res.results.map(r => (r.candidates[0] || {}).name || '');
+    $('cards').innerHTML = res.results.map((r, i) => {
+      const list = r.candidates.slice(0, 3).map((c, j) =>
+        '<li class="' + (j === 0 ? 'pick' : '') + '" data-slot="' + i +
+        '" data-name="' + esc(c.name) + '">' +
+        '<span class="nm">' + esc(c.name) + '</span>' +
+        '<span class="sc">' + c.finalScore.toFixed(3) + '</span></li>').join('');
+      return '<section class="card"><h2>' + SLOTS[i].label + '</h2>' +
+        '<img class="q" src="' + qs[i].preview + '" alt="">' +
+        '<div class="badge ' + r.status + '">' + STATUS_LABEL[r.status] + '</div>' +
+        (r.status === 'nomatch' ? '' : '<ol class="cands">' + list + '</ol>') +
+        '</section>';
+    }).join('');
+    bindPicks();
+    updateGo();
+    const pool = res.results[0] ? res.results[0].poolSize : 0;
+    $('status').textContent = '完了  ' + pool + ' 枚から照合';
+  } catch (e) {
+    $('status').textContent = 'エラー: ' + e.message;
+  }
+}
+
+/// 闘技場ページの #text= はカンマ区切りで複数指定できる
+const HS_URL = 'https://hsreplay.net/ja/arena/cards/#text=';
+let PICKED = [];
+
+function bindPicks() {
+  $('cards').querySelectorAll('.cands li').forEach(li => {
+    li.onclick = () => {
+      const slot = +li.dataset.slot;
+      PICKED[slot] = li.dataset.name;
+      li.parentElement.querySelectorAll('li').forEach(x => x.classList.remove('pick'));
+      li.classList.add('pick');
+      updateGo();
+    };
+  });
+}
+
+function updateGo() {
+  const names = PICKED.filter(Boolean);
+  $('go').style.display = names.length ? 'block' : 'none';
+  $('picked').textContent = names.length
+    ? names.join('、') + ' で検索します（候補をタップすると入れ替えられます）'
+    : '';
+}
+
+$('go').onclick = () => {
+  const names = PICKED.filter(Boolean);
+  if (names.length) window.open(HS_URL + encodeURIComponent(names.join(',')), '_blank');
+};
+
+function syncCal() {
+  const a = ART[$('calSlot').value];
+  [['ax', a.x], ['ay', a.y], ['aw', a.w], ['ah', a.h]].forEach(([id, v]) => {
+    $(id).value = v * 100;
+    $(id + 'v').textContent = (v * 100).toFixed(1);
+  });
+  drawOverlay();
+}
+['ax', 'ay', 'aw', 'ah'].forEach(id => $(id).addEventListener('input', () => {
+  ART[$('calSlot').value] = {
+    x: +$('ax').value / 100, y: +$('ay').value / 100,
+    w: +$('aw').value / 100, h: +$('ah').value / 100
+  };
+  saveArt(); syncCal();
+}));
+$('calSlot').onchange = syncCal;
+$('copyAll').onclick = () => {
+  // 大きさだけ揃える。X はカードごとに違うので維持する。
+  const a = ART[$('calSlot').value];
+  SLOTS.forEach(s => { ART[s.key] = { x: ART[s.key].x, y: a.y, w: a.w, h: a.h }; });
+  saveArt(); syncCal();
+};
+$('resetCal').onclick = async () => {
+  await fetch('/api/calibration', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ art: {} })
+  }).catch(() => {});
+  ART = null;
+  await loadArt();
+  syncCal();
+};
+$('connect').onclick = refresh;
+$('refresh').onclick = refresh;
+$('judge').onclick = judge;
+$('hero').onchange = () => localStorage.setItem('arenaHero', $('hero').value);
+
+$('host').value = localStorage.getItem('arenaHost') || '';
+$('hero').value = localStorage.getItem('arenaHero') || '';
+
+loadArt().then(() => {
+  syncCal();
+  if ($('host').value) refresh();
+});
+
+fetch('/api/info').then(r => r.json()).then(j => {
+  $('info').textContent = j.ok
+    ? 'DB ' + j.cards + ' 枚 / 変種 ' + j.variants + ' 通り / Stage1 ' + j.stage1Keep + ' 枚'
+    : j.error;
+  if (!j.ok) {
+    $('alert').textContent = j.error;
+    $('alert').style.display = 'block';
+  }
+}).catch(() => {
+  $('alert').innerHTML = '認識サーバに届いていません。このページは <code>arena_server.py</code> 経由で開いてください。<br>' +
+    '現在の URL：<code>' + esc(location.href) + '</code><br>' +
+    '正しい URL：<code>http://localhost:8080/arena_assistant.html</code>';
+  $('alert').style.display = 'block';
+});
+
+if ($('host').value) refresh();
+</script>
+</body>
+</html>

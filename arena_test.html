@@ -1,0 +1,583 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Arena Assistant - 認識テスト</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0d1117;color:#f0f3f6}
+main{max-width:1180px;margin:auto;padding:18px}
+header{display:flex;align-items:baseline;gap:12px;margin-bottom:6px}
+h1{font-size:21px;margin:0}
+a{color:#58a6ff}
+h2{font-size:15px;margin:22px 0 8px;padding-bottom:6px;border-bottom:1px solid #21262d}
+.row{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap}
+input,select,button{font:inherit;border-radius:9px;border:1px solid #3d444d;padding:10px}
+input,select{background:#151b23;color:#fff;min-width:0}
+button{background:#21262d;color:#f0f3f6;font-weight:700;cursor:pointer}
+button.primary{background:#238636;border-color:#238636}
+#drop{border:2px dashed #3d444d;border-radius:14px;padding:26px;text-align:center;
+  color:#9da7b3;cursor:pointer;background:#10151c}
+#drop.hot{border-color:#238636;background:#0f1c14;color:#3fb950}
+#preview{max-width:100%;border-radius:10px;display:block;background:#000}
+#stage{position:relative;display:none;margin-top:10px;width:-moz-fit-content;width:fit-content}
+#ov{position:absolute;inset:0;pointer-events:none}
+.box{position:absolute;border:2px solid rgba(240,136,62,.5);border-radius:3px}
+.box.art{border-color:#3fb950;pointer-events:auto;cursor:move;touch-action:none}
+.box.art.on{border-color:#58a6ff;box-shadow:0 0 0 2px rgba(88,166,255,.35)}
+.box.art i{position:absolute;top:-17px;left:-2px;font-style:normal;font-size:10px;
+  background:#3fb950;color:#000;padding:0 5px;border-radius:3px}
+.box.art u{position:absolute;right:-9px;bottom:-9px;width:18px;height:18px;
+  background:#3fb950;border:2px solid #0d1117;border-radius:50%;
+  cursor:nwse-resize;touch-action:none}
+.artPrev{display:none;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px;
+  max-width:620px}
+.artPrev figure{margin:0}
+.artPrev figcaption{font-size:11px;color:#9da7b3;text-align:center;margin-bottom:4px}
+.artPrev canvas{width:100%;height:auto;border-radius:7px;border:1px solid #30363d;
+  background:#000;display:block}
+.status{font-size:13px;color:#9da7b3;min-height:20px;padding:4px 2px}
+.slot{background:#151b23;border:1px solid #30363d;border-radius:12px;padding:12px;margin:12px 0}
+.slotHead{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.slotHead h3{margin:0;font-size:15px}
+.badge{font-size:11px;padding:3px 9px;border-radius:20px}
+.badge.ok{background:#12301c;color:#3fb950;border:1px solid #238636}
+.badge.uncertain{background:#2b2411;color:#d29922;border:1px solid #9e6a03}
+.badge.nomatch{background:#2d1618;color:#f85149;border:1px solid #a4232a}
+.cmp{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px}
+.cmp figure{margin:0;text-align:center}
+.cmp figcaption{font-size:11px;color:#9da7b3;margin-bottom:4px}
+.cmp img,.cmp canvas{width:100%;height:auto;image-rendering:pixelated;
+  border-radius:8px;border:1px solid #30363d;background:#000;display:block}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #21262d;
+  font-variant-numeric:tabular-nums}
+th{color:#9da7b3;font-weight:600;font-size:11px}
+tr.best td{background:#11191f}
+.stage{background:#0d1117;border:1px solid #30363d;border-radius:9px;
+  padding:10px 12px;margin-top:10px;font-size:13px;line-height:1.8}
+.stage b{color:#79c0ff}
+.stage .bad{color:#f85149}
+.stage .good{color:#3fb950}
+.hint{font-size:12px;color:#9da7b3;line-height:1.6}
+.calibGrid{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center}
+.calibGrid b{font-variant-numeric:tabular-nums;font-size:12px;min-width:42px;text-align:right}
+details{background:#151b23;border:1px solid #30363d;border-radius:12px;padding:10px 12px;margin-top:12px}
+summary{cursor:pointer;font-weight:700}
+#hits{position:absolute;z-index:5;background:#151b23;border:1px solid #3d444d;
+  border-radius:9px;max-height:260px;overflow:auto;min-width:320px;display:none}
+#hits div{padding:9px 11px;cursor:pointer;font-size:13px;border-bottom:1px solid #21262d}
+#hits div:hover{background:#21262d}
+.wrap{position:relative}
+#alert{display:none;background:#2d1618;border:1px solid #a4232a;color:#ffb4b0;
+  border-radius:10px;padding:12px 14px;margin:10px 0;font-size:14px;line-height:1.7}
+#alert code{background:#0d1117;padding:2px 6px;border-radius:4px}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>認識テスト</h1>
+  <a href="arena_assistant.html">運用ページ</a>
+</header>
+<p class="hint">認識は運用ページと同じ <code>POST /api/recognize</code> を使います。
+ここで精度が出れば、同じ DB とサーバをそのまま iPad へ持っていけます。</p>
+
+<div id="alert"></div>
+
+<h2>1. 画像</h2>
+<div class="row">
+  <label><input type="radio" name="mode" value="art" checked> アート画像1枚</label>
+  <label><input type="radio" name="mode" value="shot"> Arenaスクリーンショット</label>
+</div>
+<div id="drop">クリックで選択、またはここへドラッグ＆ドロップ<br>
+  <span class="hint">PNG / JPEG / WEBP</span></div>
+<input type="file" id="file" accept="image/png,image/jpeg,image/webp" hidden>
+<div id="stage">
+  <img id="preview" alt="">
+  <div id="ov"></div>
+</div>
+  <p class="hint" id="ovHint" style="display:none">
+  緑の枠が認識に使うアート範囲です。<b>枠をドラッグで移動、右下の丸でサイズ変更</b>。
+  <b>3枚はそれぞれ独立</b>しているので1枚ずつ合わせられます。カードの絵だけが入るようにしてください。
+</p>
+<div class="artPrev" id="artPrev">
+  <figure><figcaption>左</figcaption><canvas></canvas></figure>
+  <figure><figcaption>中央</figcaption><canvas></canvas></figure>
+  <figure><figcaption>右</figcaption><canvas></canvas></figure>
+</div>
+
+<h2>2. 条件</h2>
+<div class="row">
+  <select id="hero">
+    <option value="">全クラス</option>
+    <option>DEATHKNIGHT</option><option>DEMONHUNTER</option><option>DRUID</option>
+    <option>HUNTER</option><option>MAGE</option><option>PALADIN</option>
+    <option>PRIEST</option><option>ROGUE</option><option>SHAMAN</option>
+    <option>WARLOCK</option><option>WARRIOR</option>
+  </select>
+  <div class="wrap" style="flex:1;min-width:240px">
+    <input id="correct" placeholder="正解カード（名前かCard IDで検索・任意）" style="width:100%">
+    <div id="hits"></div>
+  </div>
+  <button id="clearCorrect">クリア</button>
+  <button id="run" class="primary">認識する</button>
+</div>
+<div id="correctInfo" class="hint"></div>
+<div id="status" class="status"></div>
+
+<div id="out"></div>
+
+<details>
+  <summary>アート枠の調整（スクリーンショットモード）</summary>
+  <p class="hint">認識に使う切り取り範囲を、画面全体に対する比率で持ちます。左・中央・右で別々です。
+  設定はサーバに保存され、運用ページと iPad でもそのまま使われます。
+  全画面配信と分割表示で位置が変わるため、固定座標にしていません。</p>
+  <div class="calibGrid">
+    <span>X %</span><input type="range" id="ax" min="0" max="95" step="0.1"><b id="axv"></b>
+    <span>Y %</span><input type="range" id="ay" min="0" max="95" step="0.1"><b id="ayv"></b>
+    <span>幅 %</span><input type="range" id="aw" min="2" max="100" step="0.1"><b id="awv"></b>
+    <span>高さ %</span><input type="range" id="ah" min="2" max="100" step="0.1"><b id="ahv"></b>
+  </div>
+  <div class="row">
+    <select id="calSlot" aria-label="調整する枠">
+      <option value="left">左の枠</option>
+      <option value="middle">中央の枠</option>
+      <option value="right">右の枠</option>
+    </select>
+    <button id="copyAll">この枠を3枚に適用</button>
+    <button id="resetCal">初期値に戻す</button>
+  </div>
+</details>
+
+<p class="hint" id="info"></p>
+</main>
+
+<script>
+/* ==========================================================================
+   共通部（arena_assistant.html と同じ内容を保つこと）
+   ========================================================================== */
+const SLOTS = [
+  { key: 'left', label: '左' },
+  { key: 'middle', label: '中央' },
+  { key: 'right', label: '右' }
+];
+// サーバ側の PW/PH, GW*2/GH*2 と一致させること
+const PW = 48, PH = 32, CW = 12, CH = 8;
+
+// 切り取り範囲はフレーム全体に対する比率。配信が全画面か分割表示かで
+// 位置が変わるため固定座標にしない。値はサーバに保存し iPad と共有する。
+let ART = null;
+let saveTimer = null;
+
+async function loadArt() {
+  try {
+    const j = await (await fetch('/api/calibration')).json();
+    if (j.ok && j.art) ART = j.art;
+  } catch (e) { /* サーバに届かない場合は後で既定値 */ }
+  if (!ART) {
+    ART = { left:   { x: 0.167, y: 0.115, w: 0.092, h: 0.054 },
+            middle: { x: 0.341, y: 0.115, w: 0.092, h: 0.054 },
+            right:  { x: 0.523, y: 0.115, w: 0.092, h: 0.054 } };
+  }
+}
+function saveArt() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    fetch('/api/calibration', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ art: ART })
+    }).catch(() => {});
+  }, 400);
+}
+function artRect(key, iw, ih) {
+  const a = ART[key];
+  return { x: a.x * iw, y: a.y * ih, w: a.w * iw, h: a.h * ih };
+}
+function toB64(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return btoa(s);
+}
+function extract(src, r) {
+  const mid = document.createElement('canvas');
+  mid.width = PW * 4; mid.height = PH * 4;
+  const mc = mid.getContext('2d', { willReadFrequently: true });
+  mc.imageSmoothingEnabled = true; mc.imageSmoothingQuality = 'high';
+  mc.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, mid.width, mid.height);
+
+  const gc = document.createElement('canvas');
+  gc.width = PW; gc.height = PH;
+  const g2 = gc.getContext('2d', { willReadFrequently: true });
+  g2.imageSmoothingQuality = 'high';
+  g2.drawImage(mid, 0, 0, PW, PH);
+  const gd = g2.getImageData(0, 0, PW, PH).data;
+  const gray = new Uint8Array(PW * PH);
+  for (let i = 0, j = 0; i < gd.length; i += 4, j++) {
+    gray[j] = (0.299 * gd[i] + 0.587 * gd[i + 1] + 0.114 * gd[i + 2]) | 0;
+  }
+
+  const cc = document.createElement('canvas');
+  cc.width = CW; cc.height = CH;
+  const c2 = cc.getContext('2d', { willReadFrequently: true });
+  c2.imageSmoothingQuality = 'high';
+  c2.drawImage(mid, 0, 0, CW, CH);
+  const cd = c2.getImageData(0, 0, CW, CH).data;
+  const color = new Uint8Array(CW * CH * 3);
+  for (let i = 0, j = 0; i < cd.length; i += 4) {
+    color[j++] = cd[i]; color[j++] = cd[i + 1]; color[j++] = cd[i + 2];
+  }
+
+  const pv = document.createElement('canvas');
+  pv.width = 192; pv.height = 128;
+  pv.getContext('2d').drawImage(src, r.x, r.y, r.w, r.h, 0, 0, 192, 128);
+  return { gray: toB64(gray), color: toB64(color),
+           preview: pv.toDataURL('image/png'), grayArr: gray };
+}
+async function recognize(queries, hero, debug, correctId) {
+  const res = await fetch('/api/recognize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ queries, hero, debug: !!debug, correctId: correctId || '' })
+  });
+  const j = await res.json().catch(() => ({ ok: false, error: 'HTTP ' + res.status }));
+  if (!j.ok) throw new Error(j.error || ('HTTP ' + res.status));
+  return j;
+}
+const STATUS_LABEL = {
+  ok: '一致', uncertain: '判定不確実',
+  nomatch: '一致するカードを特定できませんでした', empty: '候補なし'
+};
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+/* ===================== 共通部ここまで ===================== */
+
+const $ = id => document.getElementById(id);
+let IMG = null;
+let CORRECT = null;
+
+function showAlert(html) {
+  $('alert').innerHTML = html;
+  $('alert').style.display = 'block';
+}
+
+// ---------- 画像入力 ----------
+function loadFile(f) {
+  if (!f || !/^image\//.test(f.type)) { $('status').textContent = '画像ファイルを選んでください。'; return; }
+  const fr = new FileReader();
+  fr.onload = () => {
+    const im = new Image();
+    im.onload = () => {
+      IMG = im;
+      $('preview').src = im.src;
+      $('stage').style.display = 'block';
+      $('status').textContent = '読み込み完了  ' + im.naturalWidth + '×' + im.naturalHeight;
+      drawOverlay();
+    };
+    im.src = fr.result;
+  };
+  fr.readAsDataURL(f);
+}
+function mode() {
+  return document.querySelector('input[name=mode]:checked').value;
+}
+$('drop').onclick = () => $('file').click();
+$('file').onchange = e => loadFile(e.target.files[0]);
+['dragenter', 'dragover'].forEach(t => $('drop').addEventListener(t, e => {
+  e.preventDefault(); $('drop').classList.add('hot');
+}));
+['dragleave', 'drop'].forEach(t => $('drop').addEventListener(t, e => {
+  e.preventDefault(); $('drop').classList.remove('hot');
+}));
+$('drop').addEventListener('drop', e => loadFile(e.dataTransfer.files[0]));
+document.addEventListener('paste', e => {
+  const it = [...(e.clipboardData || {}).items || []].find(x => x.type.startsWith('image/'));
+  if (it) loadFile(it.getAsFile());
+});
+document.querySelectorAll('input[name=mode]').forEach(r =>
+  r.addEventListener('change', () => { $('out').innerHTML = ''; drawOverlay(); }));
+
+// ---------- アート枠のオーバーレイ ----------
+function drawOverlay() {
+  const on = IMG && mode() === 'shot' && ART;
+  $('ov').style.display = on ? 'block' : 'none';
+  $('ovHint').style.display = on ? 'block' : 'none';
+  $('artPrev').style.display = on ? 'grid' : 'none';
+  if (!on) { $('ov').innerHTML = ''; return; }
+  const sel = $('calSlot').value;
+  $('ov').innerHTML = SLOTS.map(s => {
+    const a = ART[s.key];
+    return '<div class="box art' + (s.key === sel ? ' on' : '') + '" data-key="' + s.key +
+      '" style="left:' + (a.x * 100) + '%;top:' + (a.y * 100) +
+      '%;width:' + (a.w * 100) + '%;height:' + (a.h * 100) +
+      '%"><i>' + s.label + '</i><u></u></div>';
+  }).join('');
+  bindDrag();
+  updateArtPreview();
+}
+
+function updateArtPreview() {
+  if (!IMG || !ART) return;
+  $('artPrev').querySelectorAll('canvas').forEach((cv, i) => {
+    const r = artRect(SLOTS[i].key, IMG.naturalWidth, IMG.naturalHeight);
+    cv.width = 192; cv.height = 128;
+    cv.getContext('2d').drawImage(IMG, r.x, r.y, r.w, r.h, 0, 0, 192, 128);
+  });
+}
+
+let drag = null;
+function bindDrag() {
+  $('ov').querySelectorAll('.box.art').forEach(el => {
+    el.addEventListener('pointerdown', ev => {
+      const box = $('preview').getBoundingClientRect();
+      if (!box.width) return;
+      const key = el.dataset.key;
+      $('calSlot').value = key;
+      drag = {
+        key, box, from: Object.assign({}, ART[key]),
+        mode: ev.target.tagName === 'U' ? 'size' : 'move',
+        px: ev.clientX, py: ev.clientY
+      };
+      el.setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+    });
+    el.addEventListener('pointermove', ev => {
+      if (!drag) return;
+      const dx = (ev.clientX - drag.px) / drag.box.width;
+      const dy = (ev.clientY - drag.py) / drag.box.height;
+      const a = drag.from;
+      const cl = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+      const rd = v => Math.round(v * 10000) / 10000;
+      ART[drag.key] = drag.mode === 'move'
+        ? { x: rd(cl(a.x + dx, 0, 1 - a.w)), y: rd(cl(a.y + dy, 0, 1 - a.h)), w: a.w, h: a.h }
+        : { x: a.x, y: a.y,
+            w: rd(cl(a.w + dx, 0.02, 1 - a.x)), h: rd(cl(a.h + dy, 0.02, 1 - a.y)) };
+      saveArt(); syncCal(); drawOverlay();
+      ev.preventDefault();
+    });
+    el.addEventListener('pointerup', () => { drag = null; });
+  });
+}
+
+// ---------- 正解カード検索 ----------
+let timer = null;
+$('correct').addEventListener('input', () => {
+  clearTimeout(timer);
+  const q = $('correct').value.trim();
+  if (!q) { $('hits').style.display = 'none'; return; }
+  timer = setTimeout(async () => {
+    try {
+      const j = await (await fetch('/api/cards?q=' + encodeURIComponent(q))).json();
+      if (!j.ok || !j.cards.length) { $('hits').style.display = 'none'; return; }
+      $('hits').innerHTML = j.cards.map(c =>
+        '<div data-id="' + esc(c.cardId) + '" data-name="' + esc(c.name) + '">' +
+        esc(c.name) + ' <span class="hint">' + esc(c.cardId) + ' / ' +
+        esc(c.cardClass) + '</span></div>').join('');
+      $('hits').style.display = 'block';
+    } catch (e) { $('hits').style.display = 'none'; }
+  }, 200);
+});
+$('hits').addEventListener('click', e => {
+  const d = e.target.closest('div[data-id]');
+  if (!d) return;
+  CORRECT = { id: d.dataset.id, name: d.dataset.name };
+  $('correct').value = d.dataset.name;
+  $('hits').style.display = 'none';
+  $('correctInfo').textContent = '正解カード: ' + CORRECT.name + '  (' + CORRECT.id + ')';
+});
+$('clearCorrect').onclick = () => {
+  CORRECT = null; $('correct').value = '';
+  $('correctInfo').textContent = ''; $('hits').style.display = 'none';
+};
+document.addEventListener('click', e => {
+  if (!e.target.closest('.wrap')) $('hits').style.display = 'none';
+});
+
+// ---------- 認識 ----------
+$('run').onclick = async () => {
+  if (!IMG) { $('status').textContent = '先に画像を読み込んでください。'; return; }
+  $('status').textContent = '認識中…';
+  $('out').innerHTML = '';
+  try {
+    let qs;
+    if (mode() === 'art') {
+      const e = extract(IMG, { x: 0, y: 0, w: IMG.naturalWidth, h: IMG.naturalHeight });
+      qs = [{ key: 'art', label: 'アート画像', gray: e.gray, color: e.color,
+              preview: e.preview, grayArr: e.grayArr }];
+    } else {
+      qs = SLOTS.map(s => {
+        const e = extract(IMG, artRect(s.key, IMG.naturalWidth, IMG.naturalHeight));
+        return { key: s.key, label: s.label, gray: e.gray, color: e.color,
+                 preview: e.preview, grayArr: e.grayArr };
+      });
+    }
+    const t0 = performance.now();
+    const res = await recognize(
+      qs.map(q => ({ key: q.key, gray: q.gray, color: q.color })),
+      $('hero').value, true, CORRECT ? CORRECT.id : '');
+    const ms = Math.round(performance.now() - t0);
+    render(res, qs);
+    $('status').textContent = '完了  ' + ms + 'ms  /  候補 ' +
+      (res.results[0] ? res.results[0].poolSize : 0) + ' 枚  /  Stage1通過 ' +
+      res.stage1Keep + ' 枚';
+  } catch (e) {
+    $('status').textContent = 'エラー: ' + e.message;
+  }
+};
+
+function render(res, qs) {
+  $('out').innerHTML = res.results.map((r, i) => {
+    const q = qs[i];
+    const top = r.candidates[0];
+    const bestSrc = top
+      ? '/api/thumb?id=' + encodeURIComponent(top.cardId) +
+        '&s=' + top.variant.scale + '&ox=' + top.variant.ox +
+        '&oy=' + top.variant.oy + '&h=' + top.variant.h + '&w=192&h2=128'
+      : '';
+    const rows = r.candidates.map(c =>
+      '<tr class="' + (c.rank === 1 ? 'best' : '') + '">' +
+      '<td>' + c.rank + '</td>' +
+      '<td>' + esc(c.name) + '</td>' +
+      '<td class="hint">' + esc(c.cardId) + '</td>' +
+      '<td><b>' + c.finalScore.toFixed(3) + '</b></td>' +
+      '<td>' + c.ssim.toFixed(3) + '</td>' +
+      '<td>' + c.edge.toFixed(3) + '</td>' +
+      '<td>' + c.color.toFixed(3) + '</td>' +
+      '<td>' + c.pixel.toFixed(3) + '</td>' +
+      '<td class="hint">' + c.variant.scale + ' / ' + c.variant.ox +
+      ' / ' + c.variant.oy + '</td></tr>').join('');
+    return '<section class="slot" data-i="' + i + '">' +
+      '<div class="slotHead"><h3>' + esc(q.label) + '</h3>' +
+      '<span class="badge ' + r.status + '">' + STATUS_LABEL[r.status] + '</span>' +
+      '<span class="hint">1位と2位の差 ' + r.gap.toFixed(3) + '</span></div>' +
+      '<div class="cmp">' +
+      '<figure><figcaption>Query（認識に使った画像）</figcaption>' +
+      '<img src="' + q.preview + '" alt=""></figure>' +
+      '<figure><figcaption>Best match（DB側・勝ち変種）</figcaption>' +
+      (bestSrc ? '<img class="best" src="' + bestSrc + '" alt="">' : '<canvas></canvas>') +
+      '</figure>' +
+      '<figure><figcaption>Difference</figcaption><canvas class="diff"></canvas></figure>' +
+      '</div>' +
+      '<table><thead><tr><th>#</th><th>カード名</th><th>Card ID</th><th>Final</th>' +
+      '<th>SSIM</th><th>Edge</th><th>Color</th><th>Pixel</th>' +
+      '<th>scale/ox/oy</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+      stageBlock(r) + '</section>';
+  }).join('');
+
+  // Difference は Best match の読み込み完了後に描く
+  res.results.forEach((r, i) => {
+    const sec = $('out').querySelector('[data-i="' + i + '"]');
+    const best = sec.querySelector('img.best');
+    if (!best) return;
+    const draw = () => drawDiff(sec.querySelector('canvas.diff'), qs[i].grayArr, best);
+    if (best.complete) draw(); else best.onload = draw;
+  });
+}
+
+function stageBlock(r) {
+  if (!r.correct) return '';
+  const c = r.correct;
+  if (!c.inPool) {
+    return '<div class="stage"><b>Correct card:</b> ' + esc(c.name) +
+      ' <span class="bad">クラス絞り込みで候補から外れています</span></div>';
+  }
+  const fin = c.finalRank > 0
+    ? '<span class="' + (c.finalRank === 1 ? 'good' : 'bad') + '">Rank ' + c.finalRank + '</span>'
+    : '<span class="bad">Not found</span>';
+  let s = '<div class="stage"><b>Correct card:</b> ' + esc(c.name) + ' (' + esc(c.cardId) + ')<br>' +
+    '<b>Stage 1:</b> Rank ' + c.stage1Rank + ' / ' + c.stage1Total +
+    '　cutoff ' + c.stage1Cutoff + '<br>';
+  if (c.excludedAfterStage1) {
+    s += '<span class="bad">Correct card excluded after Stage 1</span><br>' +
+      '<span class="hint">Stage1 の絞り込みで正解が落ちています。候補数を増やすか粗特徴を見直してください。</span>';
+  } else {
+    s += '<b>Stage 2:</b> Rank ' + c.stage2Rank + ' / ' + c.stage2Total + '<br><b>Final:</b> ' + fin;
+    if (c.finalRank > 1) {
+      s += '<br><span class="hint">Stage1 は通過しているので、再順位付け側の問題です。</span>';
+    }
+  }
+  return s + '</div>';
+}
+
+function drawDiff(cv, grayArr, bestImg) {
+  if (!cv || !grayArr) return;
+  cv.width = PW; cv.height = PH;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  const tmp = document.createElement('canvas');
+  tmp.width = PW; tmp.height = PH;
+  const tc = tmp.getContext('2d', { willReadFrequently: true });
+  tc.drawImage(bestImg, 0, 0, PW, PH);
+  const b = tc.getImageData(0, 0, PW, PH).data;
+
+  // 明るさの差は正規化してから比べる。照明差ではなく構図差を見たいため。
+  let qs = 0, bs = 0;
+  for (let i = 0; i < PW * PH; i++) { qs += grayArr[i]; bs += b[i * 4]; }
+  const dq = qs / (PW * PH) - bs / (PW * PH);
+
+  const out = ctx.createImageData(PW, PH);
+  for (let i = 0; i < PW * PH; i++) {
+    const d = Math.min(255, Math.abs(grayArr[i] - (b[i * 4] + dq)) * 2);
+    out.data[i * 4] = d;
+    out.data[i * 4 + 1] = 255 - d;
+    out.data[i * 4 + 2] = 40;
+    out.data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(out, 0, 0);
+}
+
+// ---------- 校正 ----------
+function syncCal() {
+  const a = ART[$('calSlot').value];
+  [['ax', a.x], ['ay', a.y], ['aw', a.w], ['ah', a.h]].forEach(([id, v]) => {
+    $(id).value = v * 100;
+    $(id + 'v').textContent = (v * 100).toFixed(1);
+  });
+}
+['ax', 'ay', 'aw', 'ah'].forEach(id => $(id).addEventListener('input', () => {
+  ART[$('calSlot').value] = {
+    x: +$('ax').value / 100, y: +$('ay').value / 100,
+    w: +$('aw').value / 100, h: +$('ah').value / 100
+  };
+  saveArt(); syncCal(); drawOverlay();
+}));
+$('calSlot').onchange = () => { syncCal(); drawOverlay(); };
+$('copyAll').onclick = () => {
+  // 大きさだけ揃える。X はカードごとに違うので維持する。
+  const a = ART[$('calSlot').value];
+  SLOTS.forEach(s => {
+    ART[s.key] = { x: ART[s.key].x, y: a.y, w: a.w, h: a.h };
+  });
+  saveArt(); syncCal(); drawOverlay();
+};
+$('resetCal').onclick = async () => {
+  await fetch('/api/calibration', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ art: {} })
+  }).catch(() => {});
+  ART = null;
+  await loadArt();
+  syncCal(); drawOverlay();
+};
+
+loadArt().then(() => { syncCal(); drawOverlay(); });
+
+fetch('/api/info').then(r => r.json()).then(j => {
+  $('info').textContent = j.ok
+    ? 'DB ' + j.cards + ' 枚 / 変種 ' + j.variants + ' 通り / パッチ ' +
+      j.patch.join('×') + ' / numpy ' + (j.numpy ? 'あり' : 'なし')
+    : j.error;
+  if (!j.ok) showAlert(esc(j.error));
+}).catch(() => {
+  showAlert('認識サーバに届いていません。このページは <code>arena_server.py</code> 経由で開いてください。<br>' +
+    '現在の URL：<code>' + esc(location.href) + '</code><br>' +
+    '正しい URL：<code>http://localhost:8080/arena_test.html</code><br>' +
+    'Live Preview や Live Server、file:// で開くと、画面は出ますが ' +
+    '認識 API に届かず HTTP 405 / 404 になります。');
+});
+</script>
+</body>
+</html>

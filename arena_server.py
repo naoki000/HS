@@ -23,6 +23,7 @@ import base64
 import hashlib
 import json
 import os
+import socket
 import sqlite3
 import struct
 import sys
@@ -739,6 +740,28 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}, 500)
 
 
+def lan_ips():
+    """同一ネットワークの端末から到達しうる IPv4 を列挙する。"""
+    found = []
+    # UDP connect は実際には送信しないので、既定経路の送信元 IP だけ得られる
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(('8.8.8.8', 80))
+            found.append(s.getsockname()[0])
+        finally:
+            s.close()
+    except OSError:
+        pass
+    try:
+        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if ip not in found:
+                found.append(ip)
+    except OSError:
+        pass
+    return [ip for ip in found if not ip.startswith('127.')]
+
+
 def main():
     print('Arena Assistant  認識サーバ')
     print('  numpy     :', 'あり' if np is not None else 'なし（必須です）')
@@ -759,8 +782,22 @@ def main():
         except Exception as e:  # noqa: BLE001
             print('  索引の構築に失敗:', e)
     print()
-    print('  運用  http://localhost:%d/arena_assistant.html' % PORT)
-    print('  検証  http://localhost:%d/arena_test.html' % PORT)
+    print('  このPCから')
+    print('    運用  http://localhost:%d/arena_assistant.html' % PORT)
+    print('    検証  http://localhost:%d/arena_test.html' % PORT)
+    ips = lan_ips()
+    if ips:
+        print()
+        print('  同じネットワークの端末から（%s で待受中）' % HOST)
+        for ip in ips:
+            print('    運用  http://%s:%d/arena_assistant.html' % (ip, PORT))
+        print()
+        print('  つながらない場合はファイアウォールで TCP %d を許可してください。' % PORT)
+    else:
+        print()
+        print('  !! LAN の IP を取得できませんでした。ipconfig / ifconfig で確認してください。')
+    print()
+    print('  ※ 認証はありません。信頼できるネットワークでのみ使用してください。')
     try:
         # a-Shell ではサブスレッドで numpy が停止する事例があるため、
         # リクエストはメインスレッドで順に処理する。同時実行は不要。

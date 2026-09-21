@@ -89,6 +89,37 @@ summary{cursor:pointer;font-weight:700}
 #alert{display:none;background:#2d1618;border:1px solid #a4232a;color:#ffb4b0;
   border-radius:10px;padding:12px 14px;margin:10px 0;font-size:14px;line-height:1.7}
 #alert code{background:#0d1117;padding:2px 6px;border-radius:4px}
+button.add{width:100%;margin-top:8px;padding:9px;font-size:13px;
+  background:#1f6feb;border-color:#1f6feb}
+#deckBox{margin-top:14px;background:#151b23;border:1px solid #30363d;
+  border-radius:12px;padding:10px 12px}
+#deckHead{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+#deckHead h2{font-size:14px;margin:0}
+#deckTotal{color:#9da7b3;font-size:13px}
+#deckSort{margin-left:auto;padding:6px 8px;font-size:12px}
+#deckClear{padding:6px 10px;font-size:12px}
+#deckList{list-style:none;margin:0;padding:0}
+#deckList li{display:flex;gap:8px;align-items:center;padding:5px 0;
+  border-top:1px solid #21262d;font-size:13px}
+#deckList li:first-child{border-top:0}
+#deckList li.empty{color:#6e7781;justify-content:center;padding:14px 0}
+#deckList img{width:40px;height:auto;border-radius:4px;background:#000;flex:none}
+#deckList .cost{flex:none;min-width:20px;height:20px;line-height:20px;text-align:center;
+  background:#1f6feb;color:#fff;border-radius:50%;font-size:11px}
+#deckList .cnt{color:#58a6ff}
+#deckList .tok{background:#2b2411;color:#d29922;border:1px solid #9e6a03;
+  border-radius:4px;padding:0 5px;font-size:10px;white-space:nowrap}
+#deckList .del{padding:3px 11px;font-size:14px;line-height:1.3}
+#deckList img{cursor:zoom-in}
+#deckFilter{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+#deckFilter button{padding:4px 10px;font-size:12px;font-weight:400;border-radius:20px}
+#deckFilter button.on{background:#1f6feb;border-color:#1f6feb;color:#fff}
+#deckFilter .clr{color:#9da7b3}
+#shade{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;
+  align-items:center;justify-content:center;z-index:50;padding:20px}
+#shade.on{display:flex}
+#shade img{max-width:min(90vw,420px);max-height:90vh;width:auto;height:auto;
+  border-radius:10px}
 @media(max-width:620px){
   .cards{grid-template-columns:1fr}
   /* 1列のときだけ勝率順に並べ替える。3列表示では左右の位置を保つ */
@@ -140,6 +171,25 @@ summary{cursor:pointer;font-weight:700}
 </div>
 
 <div id="cards" class="cards"></div>
+
+<section id="deckBox">
+  <div id="deckHead">
+    <h2>保存したカード</h2>
+    <span id="deckTotal"></span>
+    <select id="deckSort" aria-label="並び順">
+      <option value="winDesc">勝率が高い順</option>
+      <option value="winAsc">勝率が低い順</option>
+      <option value="costDesc">マナが高い順</option>
+      <option value="costAsc">マナが低い順</option>
+      <option value="tag">種別順</option>
+    </select>
+    <button id="deckClear" class="danger">一括削除</button>
+  </div>
+  <div id="deckFilter"></div>
+  <ul id="deckList"></ul>
+</section>
+
+<div id="shade"><img alt=""></div>
 
 <details>
   <summary>切り取り範囲の調整</summary>
@@ -564,12 +614,188 @@ function renderCards() {
       '<div class="badge ' + r.status + '">' + STATUS_LABEL[r.status] + '</div>' +
       '<ol class="cands">' + list + '</ol>' +
       '<input class="find" data-slot="' + i + '" placeholder="違うときはカード名で検索">' +
-      '<ul class="found" data-slot="' + i + '"></ul></section>';
+      '<ul class="found" data-slot="' + i + '"></ul>' +
+      (sel ? '<button class="add" data-slot="' + i + '">デッキに保存</button>' : '') +
+      '</section>';
   }).join('');
   bindPicks();
   bindFind();
+  bindAdd();
   updateGo();
 }
+
+/* ----------------------------- 保存したカード ----------------------------- */
+
+let DECK = { total: 0, cards: [] };
+let DECK_FILTER = [];   // 選ばれた種別。空なら全部出す
+
+// カード種類・種族・呪文の周波数。DB の ctype / races / spell_school に対応する
+const TAG_JA = {
+  MINION: 'ミニオン', SPELL: '呪文', WEAPON: '武器', LOCATION: '場所', HERO: 'ヒーロー',
+  BEAST: '獣', DRAGON: 'ドラゴン', ELEMENTAL: 'エレメンタル', UNDEAD: 'アンデッド',
+  DEMON: '悪魔', MECHANICAL: 'メカ', MURLOC: 'マーロック', NAGA: 'ナーガ',
+  PIRATE: '海賊', DRAENEI: 'ドレナイ', QUILBOAR: 'クイルボア', TOTEM: 'トーテム',
+  ALL: '全種族',
+  SHADOW: '影', NATURE: '自然', FIRE: '火', ARCANE: '秘術', HOLY: '神聖',
+  FEL: '邪悪', FROST: '氷'
+};
+const TAG_ORDER = Object.keys(TAG_JA);
+const tagJa = t => TAG_JA[t] || t;
+
+const CARD_URL = id =>
+  'https://art.hearthstonejson.com/v1/render/latest/jaJP/256x/' +
+  encodeURIComponent(id) + '.png';
+
+function showCard(id) {
+  $('shade').querySelector('img').src = CARD_URL(id);
+  $('shade').classList.add('on');
+}
+$('shade').onclick = () => $('shade').classList.remove('on');
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') $('shade').classList.remove('on');
+});
+
+function deckWin(c) {
+  const a = c.arenaClass || c.arenaAll;
+  return a && a.win !== null && a.win !== undefined ? a.win : null;
+}
+
+/// 選んだ種別のいずれかを持つカードを残す（OR 条件）
+function filterDeck(cards) {
+  if (!DECK_FILTER.length) return cards;
+  return cards.filter(c =>
+    (c.tags || []).some(t => DECK_FILTER.indexOf(t) >= 0));
+}
+
+function renderFilter() {
+  const seen = {};
+  (DECK.cards || []).forEach(c =>
+    (c.tags || []).forEach(t => { seen[t] = (seen[t] || 0) + c.count; }));
+  const keys = Object.keys(seen).sort(
+    (a, b) => TAG_ORDER.indexOf(a) - TAG_ORDER.indexOf(b));
+  $('deckFilter').innerHTML = keys.map(t =>
+    '<button data-tag="' + esc(t) + '"' +
+    (DECK_FILTER.indexOf(t) >= 0 ? ' class="on"' : '') + '>' +
+    esc(tagJa(t)) + ' ' + seen[t] + '</button>').join('') +
+    (DECK_FILTER.length ? '<button class="clr" data-tag="">解除</button>' : '');
+
+  $('deckFilter').querySelectorAll('button').forEach(b => {
+    b.onclick = () => {
+      const t = b.dataset.tag;
+      if (!t) DECK_FILTER = [];
+      else {
+        const i = DECK_FILTER.indexOf(t);
+        if (i >= 0) DECK_FILTER.splice(i, 1); else DECK_FILTER.push(t);
+      }
+      renderDeck();
+    };
+  });
+}
+
+/// 値の無いカードはどの順序でも末尾へ送る
+function sortDeck(cards) {
+  const mode = $('deckSort').value;
+  if (mode === 'tag') {
+    const k = c => {
+      const t = (c.tags || []).filter(x => TAG_ORDER.indexOf(x) > 4)[0] ||
+        (c.tags || [])[0] || '';
+      return TAG_ORDER.indexOf(t) < 0 ? 999 : TAG_ORDER.indexOf(t);
+    };
+    return cards.slice().sort((a, b) =>
+      k(a) - k(b) || a.name.localeCompare(b.name, 'ja'));
+  }
+  const asc = mode === 'winAsc' || mode === 'costAsc';
+  const key = mode.indexOf('cost') === 0
+    ? (c => c.cost === null || c.cost === undefined ? null : c.cost)
+    : deckWin;
+  const v = c => {
+    const x = key(c);
+    return x === null ? (asc ? Infinity : -Infinity) : x;
+  };
+  return cards.slice().sort((a, b) =>
+    (asc ? v(a) - v(b) : v(b) - v(a)) || a.name.localeCompare(b.name, 'ja'));
+}
+
+async function deckCall(body) {
+  const opt = body
+    ? { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body) }
+    : {};
+  const j = await (await fetch('/api/deck', opt)).json();
+  if (!j.ok) throw new Error(j.error || '保存に失敗しました');
+  return j;
+}
+
+function renderDeck(d) {
+  if (d) DECK = d;
+  const has = !!(DECK.cards && DECK.cards.length);
+  $('deckClear').style.display = has ? '' : 'none';
+  $('deckSort').style.display = has ? '' : 'none';
+  renderFilter();
+
+  const shown = sortDeck(filterDeck(DECK.cards || []));
+  const n = shown.reduce((s, c) => s + c.count, 0);
+  $('deckTotal').textContent = has
+    ? (DECK_FILTER.length ? n + ' / ' + DECK.total + ' 枚' : DECK.total + ' 枚')
+    : '';
+
+  $('deckList').innerHTML = shown.map(c => {
+    const a = c.arenaClass || c.arenaAll;
+    const tags = (c.tags || []).filter(t => TAG_ORDER.indexOf(t) > 4)
+      .map(tagJa).join('・');
+    return '<li data-id="' + esc(c.cardId) + '">' +
+      '<span class="cost">' + (c.cost === null || c.cost === undefined ? '?' : c.cost) +
+      '</span>' +
+      '<img src="' + ART_URL(c.cardId) + '" alt="" loading="lazy" title="タップでカードを表示">' +
+      '<span class="nm">' + esc(c.name) +
+      (c.count > 1 ? ' <b class="cnt">×' + c.count + '</b>' : '') +
+      (c.token ? ' <span class="tok">付属</span>' : '') +
+      (tags ? ' <small style="opacity:.6">' + esc(tags) + '</small>' : '') + '</span>' +
+      '<span class="sc">' + (a ? pct(a.win) : '—') + '</span>' +
+      '<button class="del" title="1枚減らす">−</button></li>';
+  }).join('') ||
+    '<li class="empty">' + (has ? '条件に合うカードがありません' : 'まだありません') + '</li>';
+
+  $('deckList').querySelectorAll('li[data-id]').forEach(li => {
+    li.querySelector('img').onclick = () => showCard(li.dataset.id);
+    li.querySelector('.del').onclick = async () => {
+      try {
+        renderDeck(await deckCall({ action: 'remove', cardId: li.dataset.id }));
+      } catch (e) { $('status').textContent = 'エラー: ' + e.message; }
+    };
+  });
+}
+
+$('deckSort').onchange = () => {
+  localStorage.setItem('arenaDeckSort', $('deckSort').value);
+  renderDeck();
+};
+
+function bindAdd() {
+  $('cards').querySelectorAll('button.add').forEach(b => {
+    b.onclick = async () => {
+      const p = PICKED[+b.dataset.slot];
+      if (!p) return;
+      try {
+        const d = await deckCall(
+          { action: 'add', cardId: p.cardId, hero: LAST_HERO });
+        renderDeck(d);
+        b.textContent = '保存しました';
+        setTimeout(() => { b.textContent = 'デッキに保存'; }, 1200);
+        $('status').textContent = d.added && d.added.length
+          ? p.name + ' と、付属の ' + d.added.join('、') + ' を保存しました。'
+          : p.name + ' を保存しました。';
+      } catch (e) { $('status').textContent = 'エラー: ' + e.message; }
+    };
+  });
+}
+
+$('deckClear').onclick = async () => {
+  if (!confirm('保存したカードをすべて削除します。よろしいですか？')) return;
+  try {
+    renderDeck(await deckCall({ action: 'clear' }));
+  } catch (e) { $('status').textContent = 'エラー: ' + e.message; }
+};
 
 async function judge() {
   if (busy) return;
@@ -754,29 +980,40 @@ $('host').value = localStorage.getItem('arenaHost') || '';
 $('hero').value = localStorage.getItem('arenaHero') || '';
 $('arenaOnly').checked = localStorage.getItem('arenaOnly') !== '0';
 $('loop').checked = localStorage.getItem('arenaLoop') === '1';
+$('deckSort').value = localStorage.getItem('arenaDeckSort') || 'winDesc';
 
-loadArt().then(() => {
+// サーバは単一スレッド。起動時の問い合わせを並行させると互いに待たされるので
+// 順番に片付け、最後に映像の取得を始める。
+(async () => {
+  try {
+    renderDeck(await deckCall());
+  } catch (e) {
+    renderDeck({ total: 0, cards: [] });
+  }
+
+  try {
+    const j = await (await fetch('/api/info')).json();
+    $('info').textContent = j.ok
+      ? 'DB ' + j.cards + ' 枚 / 変種 ' + j.variants + ' 通り / Stage1 ' + j.stage1Keep +
+        ' 枚' + (j.arena ? ' / アリーナ対象 ' + j.arena.total + ' 枚' : ' / アリーナ統計なし')
+      : j.error;
+    if (!j.ok) {
+      $('alert').textContent = j.error;
+      $('alert').style.display = 'block';
+    }
+  } catch (e) {
+    $('alert').innerHTML = '認識サーバに届いていません。このページは <code>start.py</code> 経由で開いてください。<br>' +
+      '現在の URL：<code>' + esc(location.href) + '</code><br>' +
+      '正しい URL：<code>http://localhost:8080/arena_assistant.html</code>';
+    $('alert').style.display = 'block';
+  }
+
+  await loadArt();
   $('flip').checked = FLIP;
   syncCal();
   startFrames();
   if ($('loop').checked) judgeTimer = setTimeout(loopTick, LOOP_MS);
-});
-
-fetch('/api/info').then(r => r.json()).then(j => {
-  $('info').textContent = j.ok
-    ? 'DB ' + j.cards + ' 枚 / 変種 ' + j.variants + ' 通り / Stage1 ' + j.stage1Keep +
-      ' 枚' + (j.arena ? ' / アリーナ対象 ' + j.arena.total + ' 枚' : ' / アリーナ統計なし')
-    : j.error;
-  if (!j.ok) {
-    $('alert').textContent = j.error;
-    $('alert').style.display = 'block';
-  }
-}).catch(() => {
-  $('alert').innerHTML = '認識サーバに届いていません。このページは <code>start.py</code> 経由で開いてください。<br>' +
-    '現在の URL：<code>' + esc(location.href) + '</code><br>' +
-    '正しい URL：<code>http://localhost:8080/arena_assistant.html</code>';
-  $('alert').style.display = 'block';
-});
+})();
 </script>
 </body>
 </html>

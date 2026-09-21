@@ -39,6 +39,7 @@ except ImportError:
 DB_PATH = 'arena_features.sqlite3'
 CACHE_PATH = 'arena_stage1.cache'
 CALIB_PATH = 'arena_calibration.json'
+DECK_PATH = 'arena_deck.json'
 HOST = '0.0.0.0'
 PORT = 8080
 
@@ -195,15 +196,22 @@ def build_index():
 
     con = open_db()
     try:
+        cols = {r[1] for r in con.execute('PRAGMA table_info(cards)')}
+        extra = ',races,spell_school' if 'races' in cols else ''
+        has_col = 'collectible' in cols
         rows = con.execute(
-            'SELECT id,name,card_class,classes,cost,ctype,gray,color FROM cards '
-            'ORDER BY id').fetchall()
+            'SELECT id,name,card_class,classes,cost,ctype,gray,color%s%s FROM cards '
+            'ORDER BY id' % (extra, ',collectible' if has_col else '')).fetchall()
     finally:
         con.close()
     if not rows:
         raise DBMissing('DB が空です。build_card_db.py を実行してください。')
+    if not extra:
+        log('!! cards に races 列がありません。'
+            'python3 build_card_db.py --meta-only を実行してください。')
 
     ids, names, klass, classes, cost, ctype = [], [], [], [], [], []
+    tags, draftable = [], []
     gbuf, cbuf = [], []
     for r in rows:
         if len(r['gray']) != TG * TG or len(r['color']) != TC * TC * 3:
@@ -217,6 +225,18 @@ def build_index():
             classes.append([])
         cost.append(r['cost'] if r['cost'] is not None else -1)
         ctype.append(r['ctype'] or '')
+        # 種類・種族・周波数を一本のタグ列にまとめて絞り込みを単純にする
+        t = [r['ctype']] if r['ctype'] else []
+        if extra:
+            try:
+                t.extend(json.loads(r['races'] or '[]'))
+            except ValueError:
+                pass
+            if r['spell_school']:
+                t.append(r['spell_school'])
+        tags.append(t)
+        # 付属カードは3択に並ばないので、認識の候補からは外す
+        draftable.append(bool(r['collectible']) if has_col else True)
         gbuf.append(r['gray'])
         cbuf.append(r['color'])
 
@@ -233,7 +253,8 @@ def build_index():
 
     return {
         'ids': ids, 'names': names, 'klass': klass, 'classes': classes,
-        'cost': cost, 'ctype': ctype,
+        'cost': cost, 'ctype': ctype, 'tags': tags,
+        'draftable': np.array(draftable, dtype=bool),
         'costarr': np.array(cost, dtype=np.int32),
         'mana': load_mana(),
         'gray': gray, 'color': color,
@@ -392,6 +413,7 @@ def fetch_arena_pool():
     with urlopen(req, timeout=30) as r:
         raw = json.loads(r.read().decode('utf-8'))
     classes = {}
+    packages = {}
     for key, lst in (raw.get('data') or {}).items():
         m = {}
         for c in lst:
@@ -402,11 +424,17 @@ def fetch_arena_pool():
                           'win': c.get('win_rate'),
                           'played': c.get('played_win_rate'),
                           'games': c.get('num_games')}
+                # このカードはどのカードに付属して来るのか
+                for k in (c.get('package_key_card_ids') or []):
+                    packages.setdefault(k, [])
+                    if cid not in packages[k]:
+                        packages[k].append(cid)
         if m:
             classes[key] = m
     if not classes:
         raise ValueError('アリーナ統計が空でした')
-    return {'fetched': time.time(), 'range': ARENA_RANGE, 'classes': classes}
+    return {'fetched': time.time(), 'range': ARENA_RANGE,
+            'classes': classes, 'packages': packages}
 
 
 def arena_pool(force=False):
@@ -448,6 +476,56 @@ def arena_stat(prim, allm, cid):
     return prim.get(cid) or allm.get(cid)
 
 
+# ------------------------------------------------------------ ピックの保存
+
+def load_deck():
+    try:
+        with open(DECK_PATH, encoding='utf-8') as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {'hero': '', 'picks': []}
+    return {'hero': str(d.get('hero') or ''),
+            'picks': [c for c in (d.get('picks') or []) if isinstance(c, str)]}
+
+
+def save_deck(deck):
+    with open(DECK_PATH, 'w', encoding='utf-8') as f:
+        json.dump(deck, f, ensure_ascii=False)
+    return deck
+
+
+def deck_view(deck):
+    """同じカードをまとめて枚数を付け、デッキ勝率の降順で返す。"""
+    idx = index()
+    prim, allm = arena_maps(deck['hero'])
+    counts = {}
+    for cid in deck['picks']:
+        counts[cid] = counts.get(cid, 0) + 1
+
+    cards = []
+    for cid, n in counts.items():
+        i = idx['byid'].get(cid)
+        c = {'cardId': cid, 'count': n,
+             'name': idx['names'][i] if i is not None else cid,
+             'cost': idx['cost'][i] if i is not None else None,
+             'tags': idx['tags'][i] if i is not None else [],
+             'token': bool(i is not None and not idx['draftable'][i])}
+        if allm.get(cid):
+            c['arenaAll'] = allm[cid]
+        if prim.get(cid):
+            c['arenaClass'] = prim[cid]
+        cards.append(c)
+
+    def win(c):
+        a = c.get('arenaClass') or c.get('arenaAll') or {}
+        return a.get('win')
+
+    # 勝率不明は末尾へ。同率は名前順で安定させる
+    cards.sort(key=lambda c: (win(c) is None, -(win(c) or 0), c['name']))
+    return {'ok': True, 'hero': deck['hero'],
+            'total': len(deck['picks']), 'cards': cards}
+
+
 # ------------------------------------------------------------------ 照合
 
 def eligible_mask(idx, hero, arena_only=False):
@@ -463,6 +541,8 @@ def eligible_mask(idx, hero, arena_only=False):
                     or (not k and not cl))
     else:
         m = np.ones(n, dtype=bool)
+    # 付属カードはドラフトの3択に出ない
+    m = m & idx['draftable']
     if arena_only:
         prim, allm = arena_maps(hero)
         # クラス指定時はそのクラスのドラフト候補（中立込み）がそのまま使える
@@ -658,7 +738,10 @@ def png(rgb, w, h):
 
 class Handler(SimpleHTTPRequestHandler):
     server_version = 'ArenaAssistant'
-    protocol_version = 'HTTP/1.1'
+    # 単一スレッドなので keep-alive にしてはいけない。次の要求を待つ readline が
+    # 他の接続を丸ごと止めてしまい、/castframe の裏で /api/deck が返らなくなる。
+    protocol_version = 'HTTP/1.0'
+    timeout = 10
 
     def address_string(self):
         # 既定実装は逆引きDNSを引くことがあり、1リクエスト数秒待たされる
@@ -707,6 +790,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._cards(q)
             if u.path == '/api/arena':
                 return self._arena(q)
+            if u.path == '/api/deck':
+                return self._json(deck_view(load_deck()))
             if u.path == '/api/thumb':
                 return self._thumb(q)
             if u.path == '/castframe':
@@ -808,6 +893,39 @@ class Handler(SimpleHTTPRequestHandler):
         return self._bin(png(rgb.tobytes(), ow, oh), 'image/png',
                          'public, max-age=3600')
 
+    def _deck(self, body):
+        deck = load_deck()
+        act = str(body.get('action') or 'add')
+        cid = str(body.get('cardId') or '')
+        added = []
+        if act == 'clear':
+            deck = {'hero': '', 'picks': []}
+        elif act == 'remove':
+            if cid in deck['picks']:
+                deck['picks'].remove(cid)   # 重複していても1枚だけ減らす
+        elif act == 'add':
+            if cid not in index()['byid']:
+                return self._json({'ok': False, 'error': '不明なカードです: %s' % cid}, 400)
+            deck['picks'].append(cid)
+            hero = str(body.get('hero') or '')
+            if hero:
+                deck['hero'] = hero
+            # 付属カードは元カードと一緒に手に入るので同時に記録する
+            if body.get('withPackage', True):
+                byid = index()['byid']
+                for extra in ((arena_pool() or {}).get('packages') or {}).get(cid, []):
+                    if extra in byid:
+                        deck['picks'].append(extra)
+                        added.append(extra)
+        else:
+            return self._json({'ok': False, 'error': 'action が不正です'}, 400)
+        save_deck(deck)
+        view = deck_view(deck)
+        if added:
+            idx = index()
+            view['added'] = [idx['names'][idx['byid'][x]] for x in added]
+        return self._json(view)
+
     def _shutdown(self):
         """iPad には Ctrl-C が無いので、画面から終了できるようにする。"""
         body = json.dumps({'ok': True}).encode()
@@ -832,7 +950,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_error(400, 'bad host')
         try:
             req = Request(host + '/frame', headers={'User-Agent': 'ArenaAssistant'})
-            with urlopen(req, timeout=20) as r:
+            with urlopen(req, timeout=6) as r:
                 data = r.read()
                 ctype = r.headers.get('Content-Type', 'image/jpeg')
             return self._bin(data, ctype)
@@ -850,6 +968,8 @@ class Handler(SimpleHTTPRequestHandler):
                 saved = save_art(body.get('art'), body.get('flip'))
                 return self._json({'ok': True, 'art': saved['art'],
                                    'flip': saved['flip']})
+            if u.path == '/api/deck':
+                return self._deck(self._body())
             if u.path != '/api/recognize':
                 return self._json({'ok': False, 'error': 'not found'}, 404)
             body = self._body()
@@ -909,6 +1029,17 @@ class Handler(SimpleHTTPRequestHandler):
 def _die():
     time.sleep(0.3)
     os._exit(0)
+
+
+class Server(HTTPServer):
+    def handle_error(self, request, client_address):
+        e = sys.exc_info()[1]
+        # ブラウザのリロードやタブを閉じた際に必ず起きる。全文を出すと a-Shell が埋まる
+        if isinstance(e, (ConnectionResetError, BrokenPipeError,
+                          ConnectionAbortedError, TimeoutError)):
+            log('  接続が切れました (%s)' % type(e).__name__)
+            return
+        super().handle_error(request, client_address)
 
 
 def lan_ips():
@@ -979,7 +1110,7 @@ def main():
     try:
         # a-Shell ではサブスレッドで numpy が停止する事例があるため、
         # リクエストはメインスレッドで順に処理する。同時実行は不要。
-        HTTPServer((HOST, PORT), Handler).serve_forever()
+        Server((HOST, PORT), Handler).serve_forever()
     except KeyboardInterrupt:
         print('\n停止しました。')
         return 0

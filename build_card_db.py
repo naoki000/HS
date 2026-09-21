@@ -40,6 +40,17 @@ except ImportError:
 DB_PATH = 'arena_features.sqlite3'
 CACHE_PATH = 'arena_stage1.cache'
 CARDS_URL = 'https://api.hearthstonejson.com/v1/latest/{loc}/cards.collectible.json'
+# 付属カード（収集不可）も含む全カード。--tokens のときだけ使う
+ALL_CARDS_URL = 'https://api.hearthstonejson.com/v1/latest/{loc}/cards.json'
+# どの付属カードがアリーナで配られるかは HSReplay の実対戦集計から得る
+ARENA_STATS_URL = ('https://hsreplay.net/api/v1/arena/card_stats/free/'
+                   '?ArenaTimestampRangeFilter=LAST_7_DAYS')
+ARENA_UA = {
+    'User-Agent': ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                   'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36'),
+    'Accept': 'application/json',
+    'Referer': 'https://hsreplay.net/ja/arena/cards/',
+}
 RENDER_URL = 'https://art.hearthstonejson.com/v1/render/latest/{loc}/256x/{id}.png'
 ART_URL = {
     '256x': 'https://art.hearthstonejson.com/v1/256x/{id}.jpg',
@@ -65,9 +76,19 @@ def schema(con):
         classes TEXT,
         cost INTEGER,
         ctype TEXT,
+        races TEXT,
+        spell_school TEXT,
+        collectible INTEGER DEFAULT 1,
         art_src TEXT,
         gray BLOB NOT NULL,
         color BLOB NOT NULL)''')
+    # 既存DBへの移行。アートは持ったまま列だけ増やす
+    have = {r[1] for r in con.execute('PRAGMA table_info(cards)')}
+    for col, decl in (('races', 'TEXT'), ('spell_school', 'TEXT'),
+                      ('collectible', 'INTEGER DEFAULT 1')):
+        if col not in have:
+            con.execute('ALTER TABLE cards ADD COLUMN %s %s' % (col, decl))
+            print('cards に %s 列を追加しました。' % col)
     con.execute('''CREATE TABLE IF NOT EXISTS failures (
         id TEXT PRIMARY KEY, reason TEXT, tries INTEGER DEFAULT 1)''')
     con.execute('''CREATE TABLE IF NOT EXISTS meta (
@@ -99,6 +120,9 @@ def load_card_list(locale):
             'classes': c.get('classes') or [],
             'cost': c.get('cost'),
             'type': c.get('type') or '',
+            'races': c.get('races') or [],
+            'spellSchool': c.get('spellSchool') or '',
+            'collectible': 1,
         })
     print('対象カード: %d 枚' % len(out))
     return out
@@ -197,6 +221,72 @@ def build_mana(con, cards, locale, workers):
     return n
 
 
+def update_meta(con, cards):
+    """登録済みカードの付帯情報だけを更新する。アートは触らない。"""
+    have = {r[0] for r in con.execute('SELECT id FROM cards')}
+    rows = [(c['name'], c['cardClass'],
+             json.dumps(c['classes'], ensure_ascii=False),
+             c['cost'], c['type'],
+             json.dumps(c['races'], ensure_ascii=False),
+             c['spellSchool'], c['id'])
+            for c in cards if c['id'] in have]
+    con.executemany(
+        'UPDATE cards SET name=?,card_class=?,classes=?,cost=?,ctype=?,'
+        'races=?,spell_school=?,collectible=1 WHERE id=?', rows)
+    con.commit()
+    return len(rows)
+
+
+def add_tokens(con, locale, src, workers):
+    """アリーナで配られるのに収集不可なカード（付属カード）を足す。"""
+    req = urllib.request.Request(ARENA_STATS_URL, headers=ARENA_UA)
+    stats = json.loads(urllib.request.urlopen(req, timeout=60).read())
+    ids = {c['card_id'] for c in (stats.get('data') or {}).get('ALL') or []}
+    have = {r[0] for r in con.execute('SELECT id FROM cards')}
+    missing = sorted(ids - have)
+    print('アリーナ対象 %d 枚 / DB未登録 %d 枚' % (len(ids), len(missing)))
+    if not missing:
+        return 0
+
+    print('全カード一覧を取得: %s' % ALL_CARDS_URL.format(loc=locale))
+    byid = {c['id']: c for c in json.loads(get(ALL_CARDS_URL.format(loc=locale), 120))}
+
+    todo = []
+    for cid in missing:
+        c = byid.get(cid)
+        if not c or not c.get('name'):
+            print('  %-14s 一覧にもありません' % cid)
+            continue
+        todo.append({
+            'id': cid, 'name': c['name'],
+            'cardClass': c.get('cardClass') or '',
+            'classes': c.get('classes') or [],
+            'cost': c.get('cost'), 'type': c.get('type') or '',
+            'races': c.get('races') or [],
+            'spellSchool': c.get('spellSchool') or '',
+            # 3択には出ないので認識の候補からは外す
+            'collectible': 0,
+        })
+
+    pending, ok, ng = [], 0, 0
+    with ThreadPoolExecutor(max(1, workers)) as ex:
+        for card, g, c, err in ex.map(lambda x: fetch_one(x, src), todo):
+            if err:
+                ng += 1
+                print('  %-14s %-24s %s' % (card['id'], card['name'], err))
+                continue
+            ok += 1
+            pending.append((
+                card['id'], card['name'], card['cardClass'],
+                json.dumps(card['classes'], ensure_ascii=False),
+                card['cost'], card['type'],
+                json.dumps(card['races'], ensure_ascii=False),
+                card['spellSchool'], 0, src, g, c))
+    _flush(con, pending)
+    print('付属カード %d 枚を追加（失敗 %d 枚）' % (ok, ng))
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser(description='カード特徴DBを作る')
     ap.add_argument('--db', default=DB_PATH)
@@ -210,6 +300,10 @@ def main():
     ap.add_argument('--rebuild', action='store_true', help='DBを消して最初から作る')
     ap.add_argument('--mana-only', action='store_true',
                     help='マナコストのテンプレートだけを作り直す')
+    ap.add_argument('--meta-only', action='store_true',
+                    help='アートを再取得せず、名前・コスト・種族などだけ更新する')
+    ap.add_argument('--tokens', action='store_true',
+                    help='アリーナで配られる付属カード（収集不可）を追加する')
     args = ap.parse_args()
 
     if args.rebuild and os.path.exists(args.db):
@@ -228,10 +322,22 @@ def main():
     done = {r[0] for r in con.execute(
         'SELECT id FROM cards WHERE art_src=?', (args.src,))}
     failed = {r[0]: r[1] for r in con.execute('SELECT id,reason FROM failures')}
-
     if args.mana_only:
         build_mana(con, cards, args.locale, args.workers)
         con.close()
+        return 0
+
+    if args.meta_only:
+        n = update_meta(con, cards)
+        con.close()
+        print('%d 枚の情報を更新しました。アートは触っていません。' % n)
+        print('次は  python3 start.py  を起動してください。')
+        return 0
+
+    if args.tokens:
+        add_tokens(con, args.locale, args.src, args.workers)
+        con.close()
+        print('次は  python3 start.py  を起動してください。')
         return 0
 
     if args.retry_failed:
@@ -270,7 +376,10 @@ def main():
                     pending.append((
                         card['id'], card['name'], card['cardClass'],
                         json.dumps(card['classes'], ensure_ascii=False),
-                        card['cost'], card['type'], args.src, g, c))
+                        card['cost'], card['type'],
+                        json.dumps(card['races'], ensure_ascii=False),
+                        card['spellSchool'], card.get('collectible', 1),
+                        args.src, g, c))
                     con.execute('DELETE FROM failures WHERE id=?', (card['id'],))
 
                 if len(pending) >= 200:
@@ -306,8 +415,9 @@ def _flush(con, pending):
         return
     con.executemany(
         'INSERT OR REPLACE INTO cards '
-        '(id,name,card_class,classes,cost,ctype,art_src,gray,color) '
-        'VALUES(?,?,?,?,?,?,?,?,?)', pending)
+        '(id,name,card_class,classes,cost,ctype,races,spell_school,collectible,'
+        'art_src,gray,color) '
+        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', pending)
     con.commit()
     pending.clear()
 

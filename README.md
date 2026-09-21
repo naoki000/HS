@@ -10,11 +10,13 @@ Hearthstone 闘技場の3択カードを、iPad の画面配信から画像照�
 | ファイル | 役割 |
 |---|---|
 | `build_card_db.py` | カードDBを作る（これだけが作る） |
-| `arena_server.py` | 完成したDBで認識する／HTTP API |
+| `start.py` | 完成したDBで認識する／HTTP API |
 | `arena_assistant.html` | iPad 実運用 |
 | `arena_test.html` | PC 検証・デバッグ |
 | `arena_features.sqlite3` | 特徴DB（生成物・約35MB） |
 | `arena_stage1.cache` | 起動高速化キャッシュ（自動生成・消してよい） |
+| `arena_pool.json` | アリーナ対象カードと勝率のキャッシュ（自動生成・消してよい） |
+| `arena_calibration.json` | 切り取り枠と180°補正の設定（自動生成） |
 
 ## 必要なもの
 
@@ -50,7 +52,7 @@ python build_card_db.py --rebuild         最初から作り直す
 ```
 
 DB に保存するのは**アートのサムネだけ**で、照合に使う変種（crop / scale /
-offset）は `arena_server.py` が起動時に生成する。画角の調整をしても DB を
+offset）は `start.py` が起動時に生成する。画角の調整をしても DB を
 作り直す必要はない。
 
 ## 2. 途中で止まったとき
@@ -72,7 +74,7 @@ python build_card_db.py --retry-failed
 ## 3. サーバを起動する
 
 ```
-python arena_server.py
+python start.py
 ```
 
 - 運用 http://localhost:8080/arena_assistant.html
@@ -83,6 +85,13 @@ python arena_server.py
 
 初回起動時だけ変種の特徴量を計算する（数秒）。結果は `arena_stage1.cache`
 に保存され、2回目以降は即座に立ち上がる。画角の設定を変えると自動で作り直す。
+
+起動時に HSReplay からアリーナ対象カードと勝率も取得する（約4秒）。
+取得結果は `arena_pool.json` に残り、6時間は再取得しない。
+取得に失敗しても前回分で動く。どちらも無ければ絞り込みが使えなくなるだけで、認識は動く。
+
+`0.0.0.0` で待ち受けるので、同じネットワークの端末からも開ける。
+起動時に LAN の IP を表示する。**認証は無いので信頼できるネットワークでだけ使うこと**。
 
 ## 4. PC で arena_test.html を使う
 
@@ -150,7 +159,7 @@ Stage 1 rank: 1427 / 2184   cutoff: 800
 次の4つを同じフォルダへ置く。
 
 ```
-arena_server.py
+start.py
 arena_assistant.html
 arena_test.html
 arena_features.sqlite3
@@ -163,7 +172,7 @@ arena_features.sqlite3
 
 ```
 cd ~/Documents/arena
-python3 arena_server.py
+python3 start.py
 ```
 
 Safari で http://localhost:8080/arena_assistant.html を開く。
@@ -171,6 +180,22 @@ Safari で http://localhost:8080/arena_assistant.html を開く。
 1. Cast to Browser の IP を入れて「接続」
 2. クラスを選ぶ
 3. 「判定」
+
+接続後は**1.5秒ごとに画像を自動更新**する。「判定」は必ず最新画像の
+取得から始まるので、古い画面で判定されることはない。
+
+操作画面の項目。
+
+| 項目 | 動作 |
+|---|---|
+| ループ判定（5秒ごと） | ON の間、5秒間隔で自動判定し続ける |
+| アリーナ対象のみ | 照合先をアリーナのカードに限定する（既定 ON） |
+| 候補をタップ | そのカードに差し替える |
+| カード名で検索 | 認識が外れたときに名前で探して差し替える |
+| サーバを停止 | a-Shell の Python を終了させる |
+
+判定結果には、特定したカードのアートと、HSReplay の
+**引いた時の勝率とピック率**が並ぶ。一致しなかった場合でも候補は表示される。
 
 緑の枠がカードのアート部分に重なっていることを確認すること。
 ズレていると認識できない。「アート枠の調整」で合わせられる。
@@ -189,7 +214,7 @@ python build_card_db.py --rebuild
 
 新カード追加時は `--rebuild` なしでよい。未登録のカードだけ追加される。
 
-画角の調整だけなら DB の作り直しは不要。`arena_server.py` の `CAL` を
+画角の調整だけなら DB の作り直しは不要。`start.py` の `CAL` を
 変更して再起動すれば、変種が作り直される。
 
 ---
@@ -247,14 +272,39 @@ Top1 25%、DB側に作る方式が Top1 100% だった。
 - NEUTRAL のカード
 - `classes` にそのクラスを含むマルチクラスカード
 
-闘技場の現在のカードプールに絞る機能は入れていない。信頼できるプール情報を
-取得する手段が無いため、勝手に除外していない。
+## アリーナ対象への絞り込み
+
+「アリーナ対象のみ」を ON にすると、照合先が大幅に減る。
+
+| クラス | 絞り込み OFF | 絞り込み ON |
+|---|---|---|
+| 全クラス | 7351 枚 | 1057 枚 |
+| パラディン | 2618 枚 | **299 枚** |
+
+対象カードの判定には HSReplay の統計 API を使う。
+
+```
+https://hsreplay.net/api/v1/arena/card_stats/free/?ArenaTimestampRangeFilter=LAST_7_DAYS
+```
+
+**これは公式のローテーション表ではなく、直近7日間の実対戦に登場した
+カードの集合**。ローリング集計なので、ローテーションが変わっても最長で7日で
+自動に追従する。手動でセット一覧を管理する必要はない。
+
+知っておくべき制約。
+
+- 集計は **アンダーグラウンド・アリーナ固定**。無料エンドポイントでは変更できない
+- 実測値なので、理論上は「プールにあるが誰も引かなかったカード」が漏れうる。
+  ただし 1日で1078枚、7日で1080枚と差がほぼ無く、実害は見られない
+- 絞り込んだ結果が 0 枚になる場合は絞り込まない
+
+チェックを外せば従来どおり DB 全体から探す。
 
 ## うまくいかないとき
 
 **「arena_features.sqlite3 がありません」** … `build_card_db.py` を実行する。
 
-**HTTP 405 / 404 になる** … ページを `arena_server.py` 以外で開いている。
+**HTTP 405 / 404 になる** … ページを `start.py` 以外で開いている。
 VS Code の Live Preview や Live Server、`file://` だと HTML は表示されるが
 認識 API に届かない。必ず `http://localhost:8080/arena_test.html` で開くこと。
 
@@ -267,7 +317,7 @@ iPad と配信元が同じネットワークにいる必要がある。
 `arena_test.html` にスクリーンショットを入れて Query 画像を見る。
 アート以外（枠や文字）が写っていたら「アート枠の調整」で合わせる。
 
-**Query は合っているのに当たらない** … `arena_server.py` の `CAL` を調整する。
+**Query は合っているのに当たらない** … `start.py` の `CAL` を調整する。
 `aspect` はアート枠の横/縦比、`scales` は元アートのどれだけが映っているか。
 変更後はサーバを再起動する（DBの作り直しは不要）。
 

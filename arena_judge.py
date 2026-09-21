@@ -33,7 +33,7 @@ except ImportError:
     print('Pillow がありません。  pip install Pillow')
     sys.exit(1)
 
-import arena_server as A
+import start as A
 
 # 段階ごとの進捗は普段は不要。--verbose で戻せる。
 A.VERBOSE = '--verbose' in sys.argv or '-v' in sys.argv

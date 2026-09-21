@@ -18,6 +18,7 @@ input,select{background:#151b23;color:#fff;min-width:0}
 input[type=text],input:not([type]){flex:1}
 button{background:#21262d;color:#f0f3f6;font-weight:700;cursor:pointer}
 button.primary{background:#238636;border-color:#238636;flex:1}
+button.danger{background:#2d1618;border-color:#a4232a;color:#ffb4b0;font-weight:400}
 .status{font-size:13px;color:#9da7b3;min-height:20px;padding:4px 2px}
 .frame{position:relative;background:#000;border-radius:12px;overflow:hidden;margin-top:8px;
   -webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
@@ -46,6 +47,23 @@ button.primary{background:#238636;border-color:#238636;flex:1}
 .card h2 .mana{display:inline-block;background:#1f6feb;color:#fff;border-radius:50%;
   width:18px;height:18px;line-height:18px;text-align:center;font-size:11px}
 .card img.q{width:100%;border-radius:6px;display:block;background:#000}
+.opts{flex-wrap:wrap;align-items:center}
+.hit{display:flex;gap:10px;align-items:center;margin:0 0 8px}
+.hit img{width:88px;height:auto;border-radius:6px;background:#000;flex:none}
+.hit .meta{min-width:0;flex:1}
+.hit .nm2{font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wr{font-size:12px;color:#9da7b3;margin-top:4px;line-height:1.5}
+.wrRow{display:flex;flex-wrap:wrap;gap:0 8px}
+.wrRow .wrLab{min-width:5.5em;color:#6e7781}
+.wrRow.strong{color:#f0f3f6}
+.wrRow b{color:#3fb950;font-variant-numeric:tabular-nums;font-size:13px}
+.wrRow.low b{color:#f85149}
+.wr small{opacity:.65}
+input.find{width:100%;margin-top:9px;padding:8px 10px;font-size:13px}
+.found{list-style:none;margin:6px 0 0;padding:0;max-height:210px;overflow:auto}
+.found li{display:flex;gap:8px;align-items:center;padding:5px 0;
+  border-top:1px solid #21262d;cursor:pointer;font-size:13px}
+.found li img{width:44px;height:auto;border-radius:4px;background:#000;flex:none}
 .badge{display:inline-block;margin:8px 0 6px;font-size:11px;padding:3px 8px;border-radius:20px}
 .badge.ok{background:#12301c;color:#3fb950;border:1px solid #238636}
 .badge.uncertain{background:#2b2411;color:#d29922;border:1px solid #9e6a03}
@@ -71,7 +89,11 @@ summary{cursor:pointer;font-weight:700}
 #alert{display:none;background:#2d1618;border:1px solid #a4232a;color:#ffb4b0;
   border-radius:10px;padding:12px 14px;margin:10px 0;font-size:14px;line-height:1.7}
 #alert code{background:#0d1117;padding:2px 6px;border-radius:4px}
-@media(max-width:620px){.cards{grid-template-columns:1fr}}
+@media(max-width:620px){
+  .cards{grid-template-columns:1fr}
+  /* 1列のときだけ勝率順に並べ替える。3列表示では左右の位置を保つ */
+  .card{order:var(--rank,0)}
+}
 </style>
 </head>
 <body>
@@ -96,8 +118,12 @@ summary{cursor:pointer;font-weight:700}
     <option>PRIEST</option><option>ROGUE</option><option>SHAMAN</option>
     <option>WARLOCK</option><option>WARRIOR</option>
   </select>
-  <button id="refresh">最新画像</button>
   <button id="judge" class="primary">判定</button>
+</div>
+
+<div class="row opts">
+  <label class="flipRow"><input type="checkbox" id="loop">ループ判定（5秒ごと）</label>
+  <label class="flipRow"><input type="checkbox" id="arenaOnly" checked>アリーナ対象のみ</label>
 </div>
 
 <button id="go">HSReplay で3枚の勝率を見る</button>
@@ -149,6 +175,10 @@ summary{cursor:pointer;font-weight:700}
     <figure><figcaption>右</figcaption><canvas></canvas></figure>
   </div>
 </details>
+
+<div class="row">
+  <button id="quit" class="danger">サーバを停止</button>
+</div>
 
 <p class="hint" id="info"></p>
 </main>
@@ -234,9 +264,9 @@ async function loadArt() {
     const j = await (await fetch('/api/calibration')).json();
     if (j.ok && j.art) ART = j.art;    if (j.ok) FLIP = !!j.flip;  } catch (e) { /* サーバに届かない場合は後で既定値 */ }
   if (!ART) {
-    ART = { left:   { x: 0.167, y: 0.115, w: 0.092, h: 0.054 },
-            middle: { x: 0.341, y: 0.115, w: 0.092, h: 0.054 },
-            right:  { x: 0.523, y: 0.115, w: 0.092, h: 0.054 } };
+    ART = { left:   { x: 0.150, y: 0.204, w: 0.073, h: 0.104 },
+            middle: { x: 0.308, y: 0.204, w: 0.077, h: 0.101 },
+            right:  { x: 0.473, y: 0.207, w: 0.073, h: 0.096 } };
   }
 }
 function saveArt() {
@@ -292,11 +322,12 @@ function extract(src, r) {
   return { gray: toB64(gray), color: toB64(color),
            preview: pv.toDataURL('image/png'), grayArr: gray };
 }
-async function recognize(queries, hero, debug, correctId) {
+async function recognize(queries, hero, debug, correctId, arenaOnly) {
   const res = await fetch('/api/recognize', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ queries, hero, debug: !!debug, correctId: correctId || '' })
+    body: JSON.stringify({ queries, hero, debug: !!debug,
+                           correctId: correctId || '', arenaOnly: !!arenaOnly })
   });
   const j = await res.json().catch(() => ({ ok: false, error: 'HTTP ' + res.status }));
   if (!j.ok) throw new Error(j.error || ('HTTP ' + res.status));
@@ -320,25 +351,62 @@ function baseURL() {
   if (!/^https?:\/\//i.test(s)) s = 'http://' + s;
   return s;
 }
-function refresh() {
-  const b = baseURL();
-  if (!b) { $('status').textContent = '接続先を入力してください。'; return; }
-  localStorage.setItem('arenaHost', $('host').value.trim());
-  $('status').textContent = '取得中…';
-  $('screen').src = '/castframe?host=' + encodeURIComponent(b) + '&t=' + Date.now();
+// 画面は常に最新を映す。判定はこの取得が終わってから走らせる。
+const FRAME_MS = 1500;
+const LOOP_MS = 5000;
+let frameTimer = null, judgeTimer = null, busy = false;
+
+function grabFrame() {
+  return new Promise((res, rej) => {
+    const b = baseURL();
+    if (!b) { rej(new Error('接続先を入力してください。')); return; }
+    const img = $('screen');
+    const off = () => {
+      img.removeEventListener('load', ok); img.removeEventListener('error', ng);
+    };
+    const ok = () => { off(); applyFlip(); res(); };
+    const ng = () => { off(); rej(new Error('取得できません。')); };
+    img.addEventListener('load', ok);
+    img.addEventListener('error', ng);
+    img.src = '/castframe?host=' + encodeURIComponent(b) + '&t=' + Date.now();
+  });
 }
 
-$('screen').addEventListener('load', () => {
-  applyFlip();
-  $('status').textContent = '接続済み  ' + frameW() + '×' + frameH() +
-    (FLIP ? '  （180°補正中）' : '');
+function afterFrame() {
   $('ov').hidden = false;
-  drawOverlay();
-});
-$('screen').addEventListener('error', () => {
-  $('status').textContent = '取得できません。IPとCast to Browserの配信を確認してください。';
-  $('ov').hidden = true;
-});
+  // 枠を作り直すとドラッグ中の指が外れるので、初回だけ組み立てる
+  if (!$('ov').children.length) drawOverlay();
+  else { updateArtPreview(); applyZoom(); }
+}
+
+function idleStatus() {
+  $('status').textContent = '接続済み  ' + frameW() + '×' + frameH() +
+    (FLIP ? '  （180°補正中）' : '') + ($('loop').checked ? '  ループ判定中' : '');
+}
+
+async function frameTick() {
+  clearTimeout(frameTimer);
+  if (!busy && !drag && baseURL()) {
+    try {
+      await grabFrame();
+      afterFrame();
+      if (!busy) idleStatus();
+    } catch (e) {
+      if (!busy) {
+        $('status').textContent =
+          '取得できません。IPとCast to Browserの配信を確認してください。';
+      }
+    }
+  }
+  // 映像を流し続けるのはループ判定中だけ。止まっている間は配信元に触らない
+  if ($('loop').checked) frameTimer = setTimeout(frameTick, FRAME_MS);
+}
+
+function startFrames() {
+  const v = $('host').value.trim();
+  if (v) localStorage.setItem('arenaHost', v);
+  frameTick();
+}
 
 // 長押しの保存メニューが出ると枠をドラッグできない
 document.querySelector('.frame').addEventListener('contextmenu', e => e.preventDefault());
@@ -427,72 +495,188 @@ function bindDrag() {
   });
 }
 
+const ART_URL = id =>
+  'https://art.hearthstonejson.com/v1/256x/' + encodeURIComponent(id) + '.jpg';
+
+let LAST = [];    // 直近の判定結果（スロットごと）
+let LAST_HERO = ''; // その判定で使ったクラス。後から変えても表示とデータをずらさない
+let CANDS = [];   // スロットごとの候補一覧
+let PICKED = [];  // スロットごとに確定したカード
+
+function pct(v) { return v === null || v === undefined ? '—' : v.toFixed(1) + '%'; }
+
+const CLASS_JA = {
+  DEATHKNIGHT: 'デスナイト', DEMONHUNTER: 'デモンハンター', DRUID: 'ドルイド',
+  HUNTER: 'ハンター', MAGE: 'メイジ', PALADIN: 'パラディン', PRIEST: 'プリースト',
+  ROGUE: 'ローグ', SHAMAN: 'シャーマン', WARLOCK: 'ウォーロック', WARRIOR: 'ウォリアー'
+};
+
+/// サイトの Deck Winrate は win。見比べられるようこれを太字で出す
+function wrRow(label, a, strong) {
+  if (!a) return '';
+  const low = a.win !== null && a.win !== undefined && a.win < 50;
+  return '<div class="wrRow' + (strong ? ' strong' : '') + (low ? ' low' : '') + '">' +
+    '<span class="wrLab">' + esc(label) + '</span>' +
+    '<span>デッキ <b>' + pct(a.win) + '</b></span>' +
+    '<span>引いた時 ' + pct(a.drawn) + '</span>' +
+    '<span>ピック ' + pct(a.pop) + '</span>' +
+    (a.games ? '<span><small>(' + a.games.toLocaleString() + '戦)</small></span>' : '') +
+    '</div>';
+}
+
+function wrHTML(c) {
+  const hero = LAST_HERO;
+  const rows = wrRow('全体', c.arenaAll, !hero) +
+    (hero ? wrRow(CLASS_JA[hero] || hero, c.arenaClass, true) : '');
+  return '<div class="wr">' + (rows || 'アリーナの勝率データなし') + '</div>';
+}
+
+function pickOf(c) {
+  return { cardId: c.cardId, name: c.name, arena: c.arena,
+           arenaAll: c.arenaAll, arenaClass: c.arenaClass };
+}
+
+function renderCards() {
+  // デッキ勝率の降順。データが無いスロットは末尾へ送る
+  const wr = i => {
+    const a = PICKED[i] && PICKED[i].arena;
+    return a && a.win !== null && a.win !== undefined ? a.win : -1;
+  };
+  const rank = [];
+  LAST.map((_, i) => i).sort((a, b) => wr(b) - wr(a))
+    .forEach((slot, pos) => { rank[slot] = pos; });
+
+  $('cards').innerHTML = LAST.map((r, i) => {
+    const sel = PICKED[i];
+    // 一致しなくても候補は出す。誤判定でも手で選び直せる方が役に立つ
+    const list = (r.candidates || []).slice(0, 5).map(c =>
+      '<li data-slot="' + i + '" data-id="' + esc(c.cardId) + '"' +
+      (sel && sel.cardId === c.cardId ? ' class="pick"' : '') + '>' +
+      '<span class="nm">' + esc(c.name) + '</span>' +
+      '<span class="sc">' + (c.arena ? pct(c.arena.win) : '—') + '</span>' +
+      '<span class="sc">' + c.finalScore.toFixed(3) + '</span></li>').join('');
+    return '<section class="card" style="--rank:' + rank[i] + '"><h2>' + SLOTS[i].label +
+      (r.detectedCost !== null && r.detectedCost !== undefined
+        ? ' <span class="mana">' + r.detectedCost + '</span>' : '') + '</h2>' +
+      (sel ? '<div class="hit"><img src="' + ART_URL(sel.cardId) + '" alt="" loading="lazy">' +
+        '<div class="meta"><div class="nm2">' + esc(sel.name) + '</div>' +
+        wrHTML(sel) + '</div></div>' : '') +
+      '<div class="badge ' + r.status + '">' + STATUS_LABEL[r.status] + '</div>' +
+      '<ol class="cands">' + list + '</ol>' +
+      '<input class="find" data-slot="' + i + '" placeholder="違うときはカード名で検索">' +
+      '<ul class="found" data-slot="' + i + '"></ul></section>';
+  }).join('');
+  bindPicks();
+  bindFind();
+  updateGo();
+}
+
 async function judge() {
-  if (!frameW()) { $('status').textContent = '先に画像を取得してください。'; return; }
-  const src = frameSrc(), iw = frameW(), ih = frameH();
-  $('status').textContent = '判定中…';
+  if (busy) return;
+  if (!baseURL()) { $('status').textContent = '接続先を入力してください。'; return; }
+  busy = true;
   try {
+    $('status').textContent = '最新画像を取得中…';
+    await grabFrame();
+    afterFrame();
+    const src = frameSrc(), iw = frameW(), ih = frameH();
+    if (!iw) throw new Error('画像を取得できませんでした。');
+    $('status').textContent = '判定中…';
     const qs = SLOTS.map(s => {
       const r = artRect(s.key, iw, ih);
       const e = extract(src, r);
       const m = extractMana(src, manaRect(s.key, iw, ih), iw, ih);
-      return { key: s.key, gray: e.gray, color: e.color, mana: m, preview: e.preview };
+      return { key: s.key, gray: e.gray, color: e.color, mana: m };
     });
-    const res = await recognize(qs, $('hero').value, false);
-    PICKED = res.results.map(r => (r.candidates[0] || {}).name || '');
-    $('cards').innerHTML = res.results.map((r, i) => {
-      const list = r.candidates.slice(0, 3).map((c, j) =>
-        '<li class="' + (j === 0 ? 'pick' : '') + '" data-slot="' + i +
-        '" data-name="' + esc(c.name) + '">' +
-        '<span class="nm">' + esc(c.name) + '</span>' +
-        '<span class="sc">' + c.finalScore.toFixed(3) + '</span></li>').join('');
-      return '<section class="card"><h2>' + SLOTS[i].label +
-        (r.detectedCost !== null && r.detectedCost !== undefined
-          ? ' <span class="mana">' + r.detectedCost + '</span>' : '') + '</h2>' +
-        '<img class="q" src="' + qs[i].preview + '" alt="">' +
-        '<div class="badge ' + r.status + '">' + STATUS_LABEL[r.status] + '</div>' +
-        (r.status === 'nomatch' ? '' : '<ol class="cands">' + list + '</ol>') +
-        '</section>';
-    }).join('');
-    bindPicks();
-    updateGo();
+    const res = await recognize(qs, $('hero').value, false, '',
+                                $('arenaOnly').checked);
+    LAST_HERO = $('hero').value;
+    LAST = res.results;
+    CANDS = res.results.map(r => r.candidates || []);
+    PICKED = CANDS.map(cs => cs[0] ? pickOf(cs[0]) : null);
+    renderCards();
     const pool = res.results[0] ? res.results[0].poolSize : 0;
-    $('status').textContent = '完了  ' + pool + ' 枚から照合';
+    $('status').textContent = '完了  ' + pool + ' 枚から照合' +
+      ($('loop').checked ? '  ループ判定中' : '');
   } catch (e) {
     $('status').textContent = 'エラー: ' + e.message;
+  } finally {
+    busy = false;
   }
 }
 
 /// 闘技場ページの #text= はカンマ区切りで複数指定できる
 const HS_URL = 'https://hsreplay.net/ja/arena/cards/#text=';
 const HS_SUFFIX = '&view=advanced';
-let PICKED = [];
+
+function hsLink() {
+  const names = PICKED.filter(Boolean).map(p => p.name);
+  if (!names.length) return '';
+  const hero = LAST_HERO;
+  return HS_URL + encodeURIComponent(names.join(',')) +
+    (hero ? '&playerClass=' + encodeURIComponent(hero) : '') + HS_SUFFIX;
+}
 
 function bindPicks() {
   $('cards').querySelectorAll('.cands li').forEach(li => {
     li.onclick = () => {
-      const slot = +li.dataset.slot;
-      PICKED[slot] = li.dataset.name;
-      li.parentElement.querySelectorAll('li').forEach(x => x.classList.remove('pick'));
-      li.classList.add('pick');
-      updateGo();
+      const s = +li.dataset.slot;
+      const c = (CANDS[s] || []).find(x => x.cardId === li.dataset.id);
+      if (!c) return;
+      PICKED[s] = pickOf(c);
+      renderCards();
+    };
+  });
+}
+
+function bindFind() {
+  $('cards').querySelectorAll('input.find').forEach(inp => {
+    let timer = null;
+    inp.oninput = () => {
+      clearTimeout(timer);
+      const s = +inp.dataset.slot;
+      const ul = $('cards').querySelector('ul.found[data-slot="' + s + '"]');
+      const term = inp.value.trim();
+      if (!term) { ul.innerHTML = ''; return; }
+      timer = setTimeout(async () => {
+        try {
+          const u = '/api/cards?q=' + encodeURIComponent(term) +
+            '&hero=' + encodeURIComponent(LAST_HERO) +
+            '&arenaOnly=' + ($('arenaOnly').checked ? '1' : '0');
+          const j = await (await fetch(u)).json();
+          const cards = j.cards || [];
+          ul.innerHTML = cards.map(c =>
+            '<li data-id="' + esc(c.cardId) + '">' +
+            '<img src="' + ART_URL(c.cardId) + '" alt="" loading="lazy">' +
+            '<span class="nm">' + esc(c.name) + '</span>' +
+            '<span class="sc">' + (c.arena ? pct(c.arena.drawn) : '—') +
+            '</span></li>').join('') ||
+            '<li style="cursor:default;color:#6e7781">見つかりません</li>';
+          ul.querySelectorAll('li[data-id]').forEach(li => {
+            li.onclick = () => {
+              const c = cards.find(x => x.cardId === li.dataset.id);
+              if (!c) return;
+              PICKED[s] = pickOf(c);
+              renderCards();
+            };
+          });
+        } catch (e) { ul.innerHTML = ''; }
+      }, 250);
     };
   });
 }
 
 function updateGo() {
-  const names = PICKED.filter(Boolean);
+  const names = PICKED.filter(Boolean).map(p => p.name);
   $('go').style.display = names.length ? 'block' : 'none';
   $('picked').textContent = names.length
-    ? names.join('、') + ' で検索します（候補をタップすると入れ替えられます）'
+    ? names.join('、') + '（候補をタップ、または検索で入れ替えられます）'
     : '';
 }
 
 $('go').onclick = () => {
-  const names = PICKED.filter(Boolean);
-  if (names.length) {
-    window.open(HS_URL + encodeURIComponent(names.join(',')) + HS_SUFFIX, '_blank');
-  }
+  const u = hsLink();
+  if (u) window.open(u, '_blank');
 };
 
 function syncCal() {
@@ -537,36 +721,62 @@ $('resetCal').onclick = async () => {
   await loadArt();
   syncCal();
 };
-$('connect').onclick = refresh;
-$('refresh').onclick = refresh;
+$('connect').onclick = startFrames;
 $('judge').onclick = judge;
+$('quit').onclick = async () => {
+  if (!confirm('認識サーバを停止します。よろしいですか？')) return;
+  clearTimeout(frameTimer); clearTimeout(judgeTimer);
+  $('loop').checked = false;
+  // プロセスが落ちるので応答が途切れることがある。失敗でも停止扱いとする
+  try { await fetch('/api/shutdown', { method: 'POST' }); } catch (e) { /* noop */ }
+  $('status').textContent = 'サーバを停止しました。a-Shell で python3 start.py を再実行してください。';
+};
 $('hero').onchange = () => localStorage.setItem('arenaHero', $('hero').value);
+$('arenaOnly').onchange = () =>
+  localStorage.setItem('arenaOnly', $('arenaOnly').checked ? '1' : '0');
+
+function loopTick() {
+  clearTimeout(judgeTimer);
+  if (!$('loop').checked) return;
+  judge().finally(() => {
+    if ($('loop').checked) judgeTimer = setTimeout(loopTick, LOOP_MS);
+  });
+}
+$('loop').onchange = () => {
+  localStorage.setItem('arenaLoop', $('loop').checked ? '1' : '0');
+  clearTimeout(judgeTimer);
+  clearTimeout(frameTimer);
+  if ($('loop').checked) { frameTick(); loopTick(); }
+  else if (frameW()) idleStatus();
+};
 
 $('host').value = localStorage.getItem('arenaHost') || '';
 $('hero').value = localStorage.getItem('arenaHero') || '';
+$('arenaOnly').checked = localStorage.getItem('arenaOnly') !== '0';
+$('loop').checked = localStorage.getItem('arenaLoop') === '1';
 
 loadArt().then(() => {
   $('flip').checked = FLIP;
   syncCal();
-  if ($('host').value) refresh();
+  startFrames();
+  if ($('loop').checked) judgeTimer = setTimeout(loopTick, LOOP_MS);
 });
 
 fetch('/api/info').then(r => r.json()).then(j => {
   $('info').textContent = j.ok
-    ? 'DB ' + j.cards + ' 枚 / 変種 ' + j.variants + ' 通り / Stage1 ' + j.stage1Keep + ' 枚'
+    ? 'DB ' + j.cards + ' 枚 / 変種 ' + j.variants + ' 通り / Stage1 ' + j.stage1Keep +
+      ' 枚' + (j.arena ? ' / アリーナ対象 ' + j.arena.total + ' 枚' : ' / アリーナ統計なし')
     : j.error;
   if (!j.ok) {
     $('alert').textContent = j.error;
     $('alert').style.display = 'block';
   }
 }).catch(() => {
-  $('alert').innerHTML = '認識サーバに届いていません。このページは <code>arena_server.py</code> 経由で開いてください。<br>' +
+  $('alert').innerHTML = '認識サーバに届いていません。このページは <code>start.py</code> 経由で開いてください。<br>' +
     '現在の URL：<code>' + esc(location.href) + '</code><br>' +
     '正しい URL：<code>http://localhost:8080/arena_assistant.html</code>';
   $('alert').style.display = 'block';
 });
-
-if ($('host').value) refresh();
 </script>
 </body>
 </html>

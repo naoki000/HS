@@ -46,9 +46,9 @@ PORT = 8080
 # 配信が全画面か分割表示かで位置が変わるため、固定座標にしない。
 # PC で合わせた値を iPad へそのまま持っていけるよう、ファイルに残す。
 ART_DEFAULT = {
-    'left':   {'x': 0.167, 'y': 0.115, 'w': 0.092, 'h': 0.054},
-    'middle': {'x': 0.341, 'y': 0.115, 'w': 0.092, 'h': 0.054},
-    'right':  {'x': 0.523, 'y': 0.115, 'w': 0.092, 'h': 0.054},
+    'left':   {'x': 0.150, 'y': 0.204, 'w': 0.073, 'h': 0.104},
+    'middle': {'x': 0.308, 'y': 0.204, 'w': 0.077, 'h': 0.101},
+    'right':  {'x': 0.473, 'y': 0.207, 'w': 0.073, 'h': 0.096},
 }
 SLOT_KEYS = ('left', 'middle', 'right')
 
@@ -85,8 +85,29 @@ CLOSE_GAP = 0.030      # 1位と2位の差がこれ未満なら「判定不確�
 
 CARDS_URL = 'https://api.hearthstonejson.com/v1/latest/jaJP/cards.collectible.json'
 
+# ---- アリーナの対象カードと勝率 ----
+# 公式のローテーション表は無いので、HSReplay の実対戦集計に
+# 登場したカードを「アリーナ対象」とみなす。ローリング集計なので
+# ローテーション変更には自動で追従する。
+# 期間は hsreplay.net の画面の既定値に揃える。ずらすとサイトと数値が合わない。
+ARENA_RANGE = 'LAST_4_DAYS'
+ARENA_URL = ('https://hsreplay.net/api/v1/arena/card_stats/free/'
+             '?ArenaTimestampRangeFilter=' + ARENA_RANGE)
+ARENA_POOL_PATH = 'arena_pool.json'
+ARENA_TTL = 6 * 3600
+# 素の urllib の UA だと Cloudflare に 403 される
+ARENA_HEADERS = {
+    'User-Agent': ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                   'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36'),
+    'Accept': 'application/json',
+    'Accept-Language': 'ja,en;q=0.9',
+    'Referer': 'https://hsreplay.net/ja/arena/cards/',
+}
+
 _lock = threading.Lock()
+_pool_lock = threading.Lock()
 _idx = None
+_pool = None
 
 # 判定の進捗を端末へ出す。iPad ではこれが唯一の手がかりになる。
 VERBOSE = True
@@ -364,20 +385,93 @@ def save_art(art, flip=None):
     return payload
 
 
+# ------------------------------------------------------- アリーナ対象と勝率
+
+def fetch_arena_pool():
+    req = Request(ARENA_URL, headers=ARENA_HEADERS)
+    with urlopen(req, timeout=30) as r:
+        raw = json.loads(r.read().decode('utf-8'))
+    classes = {}
+    for key, lst in (raw.get('data') or {}).items():
+        m = {}
+        for c in lst:
+            cid = c.get('card_id')
+            if cid:
+                m[cid] = {'drawn': c.get('drawn_win_rate'),
+                          'pop': c.get('popularity'),
+                          'win': c.get('win_rate'),
+                          'played': c.get('played_win_rate'),
+                          'games': c.get('num_games')}
+        if m:
+            classes[key] = m
+    if not classes:
+        raise ValueError('アリーナ統計が空でした')
+    return {'fetched': time.time(), 'range': ARENA_RANGE, 'classes': classes}
+
+
+def arena_pool(force=False):
+    """取得に失敗したら前回分を使う。それも無ければ None。"""
+    global _pool
+    with _pool_lock:
+        if _pool is None:
+            try:
+                with open(ARENA_POOL_PATH, encoding='utf-8') as f:
+                    _pool = json.load(f)
+            except (OSError, ValueError):
+                _pool = None
+        # 期間を変えたときは古いキャッシュを使わない
+        stale = (_pool is None
+                 or _pool.get('range') != ARENA_RANGE
+                 or (time.time() - _pool.get('fetched', 0)) > ARENA_TTL)
+        if force or stale:
+            try:
+                t0 = time.time()
+                fresh = fetch_arena_pool()
+                with open(ARENA_POOL_PATH, 'w', encoding='utf-8') as f:
+                    json.dump(fresh, f, ensure_ascii=False)
+                _pool = fresh
+                log('アリーナ対象 %d枚 を取得 %.1fs'
+                    % (len(fresh['classes'].get('ALL', {})), time.time() - t0))
+            except Exception as e:  # noqa: BLE001 - 前回分で続行する
+                log('!! アリーナ統計の取得に失敗: %s: %s' % (type(e).__name__, e))
+        return _pool
+
+
+def arena_maps(hero):
+    """(クラス別, ALL) の card_id -> 統計。クラス別には中立も含まれる。"""
+    pool = arena_pool()
+    cls = (pool or {}).get('classes') or {}
+    return cls.get((hero or '').upper()) or {}, cls.get('ALL') or {}
+
+
+def arena_stat(prim, allm, cid):
+    return prim.get(cid) or allm.get(cid)
+
+
 # ------------------------------------------------------------------ 照合
 
-def eligible_mask(idx, hero):
+def eligible_mask(idx, hero, arena_only=False):
     """ヒーロークラス + NEUTRAL + そのクラスを含むマルチクラスカード。"""
     n = len(idx['ids'])
-    if not hero:
-        return np.ones(n, dtype=bool)
-    hero = hero.upper()
-    m = np.zeros(n, dtype=bool)
-    for i in range(n):
-        k = idx['klass'][i]
-        cl = idx['classes'][i]
-        m[i] = (k == hero or k == 'NEUTRAL' or hero in cl
-                or (not k and not cl))
+    if hero:
+        hero = hero.upper()
+        m = np.zeros(n, dtype=bool)
+        for i in range(n):
+            k = idx['klass'][i]
+            cl = idx['classes'][i]
+            m[i] = (k == hero or k == 'NEUTRAL' or hero in cl
+                    or (not k and not cl))
+    else:
+        m = np.ones(n, dtype=bool)
+    if arena_only:
+        prim, allm = arena_maps(hero)
+        # クラス指定時はそのクラスのドラフト候補（中立込み）がそのまま使える
+        ids = prim or allm
+        if ids:
+            am = np.fromiter((c in ids for c in idx['ids']), dtype=bool, count=n)
+            # 絞った結果 0 枚になるなら絞らない。探せなくなる方が害が大きい
+            if am.any():
+                m = m & am
     return m
 
 
@@ -393,13 +487,13 @@ def query_descriptors(gray_bytes, color_bytes):
     }
 
 
-def recognize(q, hero, want_debug, correct_id, cost_hint=None):
+def recognize(q, hero, want_debug, correct_id, cost_hint=None, arena_only=False):
     t0 = time.time()
     log('      recognize 開始')
     idx = index()
     log('      index 取得 %.2fs' % (time.time() - t0))
     vs = idx['variants']
-    mask = eligible_mask(idx, hero)
+    mask = eligible_mask(idx, hero, arena_only)
     pool = np.flatnonzero(mask)
     if pool.size == 0:
         return {'status': 'empty', 'candidates': []}
@@ -472,12 +566,14 @@ def recognize(q, hero, want_debug, correct_id, cost_hint=None):
     top = order2[:STAGE2_RETURN]
 
     cands = []
+    prim, allm = arena_maps(hero)
     for rank, j in enumerate(top, 1):
         i = int(cand[j])
         s, ox, oy, h = vs[int(bestv[j])]
-        cands.append({
+        cid = idx['ids'][i]
+        c = {
             'rank': rank,
-            'cardId': idx['ids'][i],
+            'cardId': cid,
             'name': idx['names'][i],
             'cardClass': idx['klass'][i],
             'cost': idx['cost'][i],
@@ -489,7 +585,17 @@ def recognize(q, hero, want_debug, correct_id, cost_hint=None):
             'pixel': round(float(parts[j][3]), 4),
             'variant': {'scale': round(s, 3), 'ox': round(ox, 3),
                         'oy': round(oy, 3), 'h': round(h, 3)},
-        })
+        }
+        st = arena_stat(prim, allm, cid)
+        if st:
+            c['arena'] = st
+        st_all = allm.get(cid)
+        if st_all:
+            c['arenaAll'] = st_all
+        st_cls = prim.get(cid) if prim else None
+        if st_cls:
+            c['arenaClass'] = st_cls
+        cands.append(c)
 
     top1 = cands[0]['finalScore'] if cands else 0.0
     top2 = cands[1]['finalScore'] if len(cands) > 1 else -1.0
@@ -599,6 +705,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({'ok': True, 'art': load_art(), 'flip': load_flip()})
             if u.path == '/api/cards':
                 return self._cards(q)
+            if u.path == '/api/arena':
+                return self._arena(q)
             if u.path == '/api/thumb':
                 return self._thumb(q)
             if u.path == '/castframe':
@@ -627,20 +735,55 @@ class Handler(SimpleHTTPRequestHandler):
                      'mana': int(idx['mana']['costs'].size) if idx.get('mana') else 0,
                      'manaPatch': [MANA_TW, MANA_TH], 'manaRel': MANA_REL,
                      'bytes': os.path.getsize(DB_PATH)})
+        pool = arena_pool()
+        info['arena'] = ({'total': len(pool['classes'].get('ALL', {})),
+                          'ageSec': int(time.time() - pool['fetched'])}
+                         if pool else None)
         return self._json(info)
 
     def _cards(self, q):
         idx = index()
         term = (q.get('q', [''])[0] or '').strip().lower()
+        hero = (q.get('hero', [''])[0] or '').strip()
+        arena_only = q.get('arenaOnly', ['0'])[0] not in ('', '0', 'false')
+        prim, allm = arena_maps(hero)
+        pool = prim or allm
         out = []
         for i, name in enumerate(idx['names']):
-            if term and term not in name.lower() and term not in idx['ids'][i].lower():
+            cid = idx['ids'][i]
+            if term and term not in name.lower() and term not in cid.lower():
                 continue
-            out.append({'cardId': idx['ids'][i], 'name': name,
-                        'cardClass': idx['klass'][i], 'cost': idx['cost'][i]})
+            st = arena_stat(prim, allm, cid)
+            if arena_only and pool and st is None:
+                continue
+            c = {'cardId': cid, 'name': name,
+                 'cardClass': idx['klass'][i], 'cost': idx['cost'][i]}
+            if st:
+                c['arena'] = st
+            if allm.get(cid):
+                c['arenaAll'] = allm[cid]
+            if prim and prim.get(cid):
+                c['arenaClass'] = prim[cid]
+            out.append(c)
             if len(out) >= 40:
                 break
         return self._json({'ok': True, 'cards': out})
+
+    def _arena(self, q):
+        pool = arena_pool(force=q.get('refresh', ['0'])[0] not in ('', '0', 'false'))
+        if not pool:
+            return self._json({'ok': False,
+                               'error': 'アリーナ統計を取得できませんでした。'}, 503)
+        cls = pool['classes']
+        return self._json({
+            'ok': True,
+            'fetched': pool['fetched'],
+            'range': pool.get('range', ARENA_RANGE),
+            'ageSec': int(time.time() - pool['fetched']),
+            'total': len(cls.get('ALL', {})),
+            'byClass': {k: len(v) for k, v in cls.items()},
+            'source': ARENA_URL,
+        })
 
     def _thumb(self, q):
         """DB側サムネを返す。変種を指定すると照合時と同じ切り出しで返す。"""
@@ -665,6 +808,24 @@ class Handler(SimpleHTTPRequestHandler):
         return self._bin(png(rgb.tobytes(), ow, oh), 'image/png',
                          'public, max-age=3600')
 
+    def _shutdown(self):
+        """iPad には Ctrl-C が無いので、画面から終了できるようにする。"""
+        body = json.dumps({'ok': True}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        log('停止要求を受けました。終了します。')
+        # serve_forever の中から shutdown() を呼ぶと待ち合わせで固まる。
+        # 応答を返しきってから別スレッドでプロセスごと落とす。
+        threading.Thread(target=_die, daemon=True).start()
+
     def _castframe(self, q):
         host = (q.get('host', [''])[0] or '').rstrip('/')
         if not host.startswith(('http://', 'https://')):
@@ -682,6 +843,8 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         try:
+            if u.path == '/api/shutdown':
+                return self._shutdown()
             if u.path == '/api/calibration':
                 body = self._body()
                 saved = save_art(body.get('art'), body.get('flip'))
@@ -692,13 +855,16 @@ class Handler(SimpleHTTPRequestHandler):
             body = self._body()
             hero = str(body.get('hero', '') or '')
             debug = bool(body.get('debug'))
+            arena_only = bool(body.get('arenaOnly'))
             queries = body.get('queries') or []
             if not queries:
                 return self._json({'ok': False, 'error': 'queries が空です'}, 400)
 
             results = []
             t_all = time.time()
-            log('判定 %d枚  hero=%s' % (len(queries), hero or 'ALL'))
+            log('判定 %d枚  hero=%s%s'
+                % (len(queries), hero or 'ALL',
+                   '  アリーナ対象のみ' if arena_only else ''))
             for n, item in enumerate(queries, 1):
                 gb = base64.b64decode(item.get('gray', ''))
                 cb = base64.b64decode(item.get('color', ''))
@@ -721,7 +887,7 @@ class Handler(SimpleHTTPRequestHandler):
                 r = recognize(qd, hero, debug,
                               str(item.get('correctId', '') or
                                   body.get('correctId', '') or ''),
-                              cost_hint)
+                              cost_hint, arena_only)
                 top = (r.get('candidates') or [{}])[0]
                 log('  [%d/%d] %s -> %s %s  %.2fs'
                     % (n, len(queries), item.get('key', ''), r.get('status'),
@@ -738,6 +904,11 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             log('!! %s: %s' % (type(e).__name__, e))
             return self._json({'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}, 500)
+
+
+def _die():
+    time.sleep(0.3)
+    os._exit(0)
 
 
 def lan_ips():
@@ -781,6 +952,13 @@ def main():
             print('  変種      : %d 通り／枚' % len(idx['variants']))
         except Exception as e:  # noqa: BLE001
             print('  索引の構築に失敗:', e)
+    pool = arena_pool()
+    if pool:
+        print('  アリーナ  : %d 枚（取得から %d 分）'
+              % (len(pool['classes'].get('ALL', {})),
+                 int((time.time() - pool['fetched']) / 60)))
+    else:
+        print('  アリーナ  : 取得できませんでした（絞り込みは使えません）')
     print()
     print('  このPCから')
     print('    運用  http://localhost:%d/arena_assistant.html' % PORT)

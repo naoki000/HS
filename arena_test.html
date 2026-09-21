@@ -247,9 +247,9 @@ async function loadArt() {
     if (j.ok) FLIP = !!j.flip;
   } catch (e) { /* サーバに届かない場合は後で既定値 */ }
   if (!ART) {
-    ART = { left:   { x: 0.167, y: 0.115, w: 0.092, h: 0.054 },
-            middle: { x: 0.341, y: 0.115, w: 0.092, h: 0.054 },
-            right:  { x: 0.523, y: 0.115, w: 0.092, h: 0.054 } };
+    ART = { left:   { x: 0.150, y: 0.204, w: 0.073, h: 0.104 },
+            middle: { x: 0.308, y: 0.204, w: 0.077, h: 0.101 },
+            right:  { x: 0.473, y: 0.207, w: 0.073, h: 0.096 } };
   }
 }
 function saveArt() {
@@ -691,7 +691,7 @@ fetch('/api/info').then(r => r.json()).then(j => {
     : j.error;
   if (!j.ok) showAlert(esc(j.error));
 }).catch(() => {
-  showAlert('認識サーバに届いていません。このページは <code>arena_server.py</code> 経由で開いてください。<br>' +
+  showAlert('認識サーバに届いていません。このページは <code>start.py</code> 経由で開いてください。<br>' +
     '現在の URL：<code>' + esc(location.href) + '</code><br>' +
     '正しい URL：<code>http://localhost:8080/arena_test.html</code><br>' +
     'Live Preview や Live Server、file:// で開くと、画面は出ますが ' +

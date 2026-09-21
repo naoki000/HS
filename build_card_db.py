@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Arena Assistant - カード特徴DBの構築。
 
-このスクリプトだけが DB を作る。arena_server.py は作らない。
+このスクリプトだけが DB を作る。start.py は作らない。
 
 保存するのは「アートのサムネ」だけ。
-照合に使う変種（crop/scale/offset）は arena_server.py が起動時に生成する。
+照合に使う変種（crop/scale/offset）は start.py が起動時に生成する。
 画角の校正を変えても DB を作り直さずに済むようにするため。
 
 必要なもの
@@ -33,7 +33,7 @@ except ImportError:
 
 # サムネの大きさは認識側と一致していなければならない
 try:
-    from arena_server import TG, TC, MANA_TW, MANA_TH
+    from start import TG, TC, MANA_TW, MANA_TH
 except ImportError:
     TG, TC, MANA_TW, MANA_TH = 64, 16, 28, 32
 
@@ -335,7 +335,7 @@ def _summary(con, total, ok, skipped, ng, secs, args):
                 'SELECT id,reason FROM failures LIMIT 5'):
             print('    %-22s %s' % (cid, reason))
     if have:
-        print('次は  python3 arena_server.py  を起動してください。')
+        print('次は  python3 start.py  を起動してください。')
 
 
 if __name__ == '__main__':

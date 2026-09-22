@@ -49,10 +49,15 @@ button.danger{background:#2d1618;border-color:#a4232a;color:#ffb4b0;font-weight:
 .quick.on{display:grid}
 .quick .q{display:flex;flex-direction:column;gap:6px;min-width:0;
   background:#151b23;border:1px solid #30363d;border-radius:10px;padding:8px}
+.quick .q.best{border-color:#3fb950;background:#12211a;
+  box-shadow:0 0 0 1px #3fb950,0 0 14px rgba(63,185,80,.22)}
 .quick .qh{display:flex;align-items:center;gap:6px;font-size:11px;color:#9da7b3}
+.quick .q.best .qh{color:#3fb950}
 .quick .qh .dot{width:7px;height:7px;border-radius:50%;flex:none;background:#3fb950}
 .quick .qh .dot.uncertain{background:#d29922}
 .quick .qh .dot.nomatch{background:#f85149}
+.top{margin-left:auto;flex:none;background:#12301c;color:#3fb950;border:1px solid #238636;
+  border-radius:20px;padding:0 6px;font-size:10px;white-space:nowrap;font-weight:700}
 .quick .qn{font-weight:700;font-size:14px;line-height:1.35;overflow-wrap:anywhere}
 .quick .qw{font-size:12px;color:#9da7b3;line-height:1.5;
   font-variant-numeric:tabular-nums}
@@ -64,7 +69,8 @@ button.danger{background:#2d1618;border-color:#a4232a;color:#ffb4b0;font-weight:
   background:#1f6feb;border-color:#1f6feb}
 .quick button.done{background:#21262d;border-color:#30363d;color:#9da7b3}
 .card{background:#151b23;border:1px solid #30363d;border-radius:12px;padding:10px}
-.card h2{font-size:13px;margin:0 0 8px;color:#9da7b3}
+.card.best{border-color:#238636;box-shadow:0 0 0 1px #238636}
+.card h2{display:flex;align-items:center;gap:6px;font-size:13px;margin:0 0 8px;color:#9da7b3}
 .card h2 .mana{display:inline-block;background:#1f6feb;color:#fff;border-radius:50%;
   width:18px;height:18px;line-height:18px;text-align:center;font-size:11px}
 .card img.q{width:100%;border-radius:6px;display:block;background:#000}
@@ -150,6 +156,7 @@ button.add{width:100%;margin-top:8px;padding:9px;font-size:13px;
   .quick .q{padding:6px 5px;gap:4px}
   .quick .qn{font-size:12px}
   .quick .qw{font-size:10px}
+  .quick .qh .top{padding:0 4px;font-size:9px}
   .quick button{padding:9px 2px;font-size:12px}
 }
 </style>
@@ -711,15 +718,34 @@ function qwRow(label, a) {
     '<b>' + pct(a ? a.win : null) + '</b></div>';
 }
 
+/// 並べ替えにも強調にも同じ数字を使う。基準はヒーローの勝率で、
+/// クラス別のデータが無いカードだけ全体で代用する。
+function slotWin(i) {
+  const p = PICKED[i];
+  if (!p) return -1;
+  const a = (LAST_HERO && p.arenaClass) || p.arenaAll;
+  return a && a.win !== null && a.win !== undefined ? a.win : -1;
+}
+
+function bestSlot() {
+  let b = -1;
+  LAST.forEach((_, i) => {
+    if (slotWin(i) >= 0 && (b < 0 || slotWin(i) > slotWin(b))) b = i;
+  });
+  return b;
+}
+
 function renderQuick() {
   const q = $('quick');
   q.classList.toggle('on', LAST.length > 0);
   const hero = LAST_HERO;
+  const best = bestSlot();
   q.innerHTML = LAST.map((r, i) => {
     const sel = PICKED[i];
-    return '<div class="q">' +
+    return '<div class="q' + (i === best ? ' best' : '') + '">' +
       '<div class="qh"><span class="dot ' + r.status + '"></span>' +
-      SLOTS[i].label + '</div>' +
+      SLOTS[i].label +
+      (i === best ? '<span class="top">勝率1位</span>' : '') + '</div>' +
       '<div class="qn">' + esc(sel ? sel.name : '—') + '</div>' +
       '<div class="qw">' +
       (hero ? qwRow(CLASS_JA[hero] || hero, sel && sel.arenaClass) : '') +
@@ -735,13 +761,10 @@ function renderQuick() {
 
 function renderCards() {
   renderQuick();
-  // デッキ勝率の降順。データが無いスロットは末尾へ送る
-  const wr = i => {
-    const a = PICKED[i] && PICKED[i].arena;
-    return a && a.win !== null && a.win !== undefined ? a.win : -1;
-  };
+  const best = bestSlot();
+  // 勝率の降順。データが無いスロットは末尾へ送る
   const rank = [];
-  LAST.map((_, i) => i).sort((a, b) => wr(b) - wr(a))
+  LAST.map((_, i) => i).sort((a, b) => slotWin(b) - slotWin(a))
     .forEach((slot, pos) => { rank[slot] = pos; });
 
   $('cards').innerHTML = LAST.map((r, i) => {
@@ -753,9 +776,11 @@ function renderCards() {
       '<span class="nm">' + esc(c.name) + '</span>' +
       '<span class="sc">' + (c.arena ? pct(c.arena.win) : '—') + '</span>' +
       '<span class="sc">' + c.finalScore.toFixed(3) + '</span></li>').join('');
-    return '<section class="card" style="--rank:' + rank[i] + '"><h2>' + SLOTS[i].label +
+    return '<section class="card' + (i === best ? ' best' : '') +
+      '" style="--rank:' + rank[i] + '"><h2>' + SLOTS[i].label +
       (r.detectedCost !== null && r.detectedCost !== undefined
-        ? ' <span class="mana">' + r.detectedCost + '</span>' : '') + '</h2>' +
+        ? ' <span class="mana">' + r.detectedCost + '</span>' : '') +
+      (i === best ? ' <span class="top">勝率1位</span>' : '') + '</h2>' +
       (sel ? '<div class="hit"><img src="' + ART_URL(sel.cardId) + '" alt="" loading="lazy">' +
         '<div class="meta"><div class="nm2">' + esc(sel.name) + '</div>' +
         wrHTML(sel) + '</div></div>' : '') +

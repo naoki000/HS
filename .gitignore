@@ -6,3 +6,4 @@ arena_calibration.json
 arena_host.txt
 _bench_cache/
 *.log
+arena_deck.json

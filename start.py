@@ -38,6 +38,7 @@ except ImportError:
 
 DB_PATH = 'arena_features.sqlite3'
 CACHE_PATH = 'arena_stage1.cache'
+SHAPE_CACHE_PATH = 'arena_shape.cache'
 CALIB_PATH = 'arena_calibration.json'
 DECK_PATH = 'arena_deck.json'
 HOST = '0.0.0.0'
@@ -46,10 +47,15 @@ PORT = 8080
 # 認識に使う切り取り範囲。フレーム全体に対する比率で持つ。
 # 配信が全画面か分割表示かで位置が変わるため、固定座標にしない。
 # PC で合わせた値を iPad へそのまま持っていけるよう、ファイルに残す。
-ART_DEFAULT = {
-    'left':   {'x': 0.150, 'y': 0.204, 'w': 0.073, 'h': 0.104},
-    'middle': {'x': 0.308, 'y': 0.204, 'w': 0.077, 'h': 0.101},
-    'right':  {'x': 0.473, 'y': 0.207, 'w': 0.073, 'h': 0.096},
+#
+# 枠はカード全体を囲む。アートの形はミニオン＝縦長の楕円、呪文＝横長の角丸、
+# 武器＝円と種別ごとに違うので、「絵に合わせて」では合わせようがない。
+# カードの外枠なら種別に関係なく一意に決まり、そこからアート窓もマナ結晶も
+# 実測値で割り出せる。
+CARD_DEFAULT = {
+    'left':   {'x': 0.113, 'y': 0.175, 'w': 0.150, 'h': 0.271},
+    'middle': {'x': 0.269, 'y': 0.176, 'w': 0.158, 'h': 0.263},
+    'right':  {'x': 0.436, 'y': 0.180, 'w': 0.150, 'h': 0.250},
 }
 SLOT_KEYS = ('left', 'middle', 'right')
 
@@ -59,6 +65,42 @@ TC = 16          # 保存するカラーサムネ
 PW, PH = 48, 32  # Stage2 の照合パッチ
 GW, GH = 6, 4    # Stage1 の粗グリッド（PW/GW と PH/GH は割り切れること）
 assert PW % GW == 0 and PH % GH == 0
+
+# ---- 種別ごとのアート領域（shape 方式）----
+# ミニオンは縦長の楕円、呪文は横長の角丸、武器は円と、枠の形が種別ごとに違う。
+# 同じ長方形で切ると枠や名前バンドが混ざるので、種別ごとの窓とマスクで照合する。
+# 窓とマスクは build_card_db.py --shapes がカードレンダーから実測して DB に入れる。
+SW, SH = 40, 40    # 種別ごとに正規化した照合パッチ（窓を引き伸ばして正方形にする）
+SGW, SGH = 8, 8    # その粗グリッド
+assert SW % SGW == 0 and SH % SGH == 0
+SCW, SCH = SGW * 2, SGH * 2    # 色パッチ
+FW, FH = 48, 72    # 枠テンプレート（カード全体）
+RW, RH = 256, 388  # カードレンダーの基準サイズ。実測値はこの座標系で持つ
+# クライアントが送ってくるカード全体のパッチ。ここから種別ごとの窓を切る。
+# 手でドラッグした枠は必ずずれるので、まわりに余白を付けて送ってもらい、
+# サーバ側で枠テンプレートに合わせ直す。
+CARD_MARGIN = 0.15
+CARD_W, CARD_H = 152, 230
+CARD_CW, CARD_CH = 38, 58
+# 枠合わせの探索範囲。余白 15% ぶんまでのずれを拾えるようにする。
+# 粗く全種別を見てから、勝った種別だけを段階的に細かく詰める。
+# マナ結晶はカードの 0.2 ほどしかないので、ここが粗いと数字を切り損なう。
+ALIGN_SCALES = (0.88, 0.94, 1.0, 1.06, 1.12)
+ALIGN_SHIFT = (-0.12, -0.06, 0.0, 0.06, 0.12)
+ALIGN_FINE = (0.02, 0.007, 0.0025)
+# 窓が分からない種別はミニオン扱いにする。3択に出るのはほぼミニオンか呪文。
+SHAPE_FALLBACK = 'MINION'
+
+# クエリ側の校正ずれを吸収する微小変種。shape 方式は幾何が既知なので、
+# 37変種のような大きな探索は要らない。残差ぶんだけ DB 側をずらす。
+SHAPE_JITTER = {
+    'scales': [0.94, 1.0, 1.06],
+    'tx': [-0.05, 0.0, 0.05],
+    'ty': [-0.05, 0.0, 0.05],
+}
+TYPE_BONUS = 0.020      # 枠テンプレートで判定した種別への加点
+TYPE_MIN_MARGIN = 0.03  # 1位と2位の差がこれ未満なら種別を決めない
+SHAPE_HIGHPASS = 4      # 局所平均を引く半径。0 で無効
 
 # ---- 画角の校正。ここを変えても DB の作り直しは不要 ----
 CAL = {
@@ -76,10 +118,16 @@ STAGE2_RETURN = 8      # クライアントへ返す件数
 # 結晶の数字をテンプレート照合で読み、一致するカードを加点する。
 # 除外ではなく加点なのは、コストを誤認識しても正解を落とさないため。
 MANA_TW, MANA_TH = 28, 32
-# アート枠に対する結晶の位置。カードレンダーから実測した。
-MANA_REL = {'x': -0.391, 'y': -0.191, 'w': 0.393, 'h': 0.492}
-COST_BONUS = 0.030     # コストが一致した候補への加点
-COST_MIN_MARGIN = 0.02  # 実測で、この差があれば誤読ゼロ・採用率88%
+# カード全体に対する結晶の位置。build_card_db.py の GEM_BOX と同じ実測値。
+GEM_REL = {'x': 0.020, 'y': 0.040, 'w': 0.215, 'h': 0.175}
+# 結晶は 25px ほどしかなく、カード全体のパッチ経由だと数字が潰れて読めない。
+# 校正枠のこの範囲だけ原寸で別に送ってもらい、枠合わせの結果で切り直す。
+GEM_PAD = (-0.10, -0.08, 0.34, 0.34)
+GEM_W, GEM_H = 96, 120
+COST_BONUS = 0.030     # コストが一致した候補への加点（旧方式のみ）
+# 清潔なレンダーなら 96% 読めるが、実機相当まで落とすと 0.05 でやっと
+# 採用率 35% / 誤読 11%。旧値 0.02 はアート画像で測った値で、実機では甘い。
+COST_MIN_MARGIN = 0.05
 W_SSIM, W_EDGE, W_COLOR, W_PIXEL = 0.40, 0.30, 0.15, 0.15
 MIN_ACCEPT = 0.45      # これ未満は「特定できない」
 CLOSE_GAP = 0.030      # 1位と2位の差がこれ未満なら「判定不確実」
@@ -174,6 +222,87 @@ def coarse_from_patch(gray, color):
     return np.clip(np.concatenate(flat, axis=-1), 0, 255)
 
 
+# --------------------------------------------------- 種別ごとのアート領域
+
+def span(n, a0, a1, out):
+    """長さ n の軸の [a0,a1)（0..1 の比率）を out 個へ等間隔で割り当てる。"""
+    return np.clip(np.linspace(a0 * n, a1 * n - 1, out), 0, n - 1).astype(np.int32)
+
+
+def wznorm(v, w, axis=-1):
+    """重み付きの平均0分散1。マスク外の画素を無視して正規化する。"""
+    s = w.sum(axis=axis, keepdims=True) + 1e-6
+    m = (v * w).sum(axis=axis, keepdims=True) / s
+    d = v - m
+    sd = np.sqrt((d * d * w).sum(axis=axis, keepdims=True) / s) + 1e-6
+    return d / sd
+
+
+def wblock_mean(a, w, by, bx):
+    """マスクの重みを効かせたブロック平均。重みが無いブロックは 0 にする。"""
+    num = block_mean(a * w, by, bx)
+    den = block_mean(w, by, bx)
+    return np.where(den > 0.05, num / np.maximum(den, 1e-6), 0.0)
+
+
+def highpass(a, r=SHAPE_HIGHPASS):
+    """局所平均を引く。カード枠がアートに掛けている陰影を打ち消すため。
+
+    ゲーム画面のアートには枠の内側に向かって暗くなる陰影が乗っているが、
+    DB 側は素のアートなので乗っていない。全体を平均0にするだけでは消えず、
+    輪郭の近くほど大きな差として残る。
+    """
+    if not r:
+        return a
+    k = 2 * r + 1
+    pad = [(0, 0)] * (a.ndim - 2) + [(r + 1, r), (r + 1, r)]
+    p = np.pad(a, pad, mode='edge')
+    c = np.cumsum(np.cumsum(p, axis=-1), axis=-2)
+    box = (c[..., k:, k:] - c[..., :-k, k:]
+           - c[..., k:, :-k] + c[..., :-k, :-k]) / float(k * k)
+    return a - box
+
+
+def shape_coarse(gray, color, mask, cmask):
+    """Stage1 用の粗特徴（種別マスク版）。gray:(...,SH,SW) color:(...,SCH,SCW,3)"""
+    y = wblock_mean(gray, mask, SH // SGH, SW // SGW)
+    e = wblock_mean(edge_map(gray), mask, SH // SGH, SW // SGW) * 0.5
+    cm = np.moveaxis(color, -1, -3).astype(np.float32) * cmask
+    c = block_mean(cm, SCH // SGH, SCW // SGW)
+    flat = [y.reshape(y.shape[:-2] + (-1,)),
+            e.reshape(e.shape[:-2] + (-1,)),
+            c.reshape(c.shape[:-3] + (-1,))]
+    return np.clip(np.concatenate(flat, axis=-1), 0, 255)
+
+
+def art_box(sh, jitter=(1.0, 0.0, 0.0)):
+    """カード座標のアート窓を、素アート（0..1）上の矩形に直す。
+
+    build_card_db.py --shapes が測った render(u,v) -> art(s*u+ox, s*v+oy) を使う。
+    jitter は校正ずれを吸収するための拡大率と平行移動（窓の大きさに対する比率）。
+    """
+    s, ox, oy = sh['s'], sh['ox'], sh['oy']
+    x0 = (s * sh['u0'] * RW + ox) / 256.0
+    x1 = (s * sh['u1'] * RW + ox) / 256.0
+    y0 = (s * sh['v0'] * RH + oy) / 256.0
+    y1 = (s * sh['v1'] * RH + oy) / 256.0
+    k, tx, ty = jitter
+    w, h = (x1 - x0), (y1 - y0)
+    cx, cy = x0 + w / 2 + tx * w, y0 + h / 2 + ty * h
+    return cx - w * k / 2, cy - h * k / 2, cx + w * k / 2, cy + h * k / 2
+
+
+def shape_jitter():
+    out = []
+    for k in SHAPE_JITTER['scales']:
+        for tx in SHAPE_JITTER['tx']:
+            for ty in SHAPE_JITTER['ty']:
+                out.append((k, tx, ty))
+    # 先頭を無変形にしておくと、Stage1 の粗特徴と同じ切り出しになる
+    out.sort(key=lambda v: (abs(v[0] - 1.0) + abs(v[1]) + abs(v[2])))
+    return out
+
+
 # ------------------------------------------------------------------ 索引
 
 def open_db():
@@ -188,6 +317,39 @@ def open_db():
 def cal_key():
     raw = json.dumps([CAL, TG, TC, PW, PH, GW, GH], sort_keys=True).encode()
     return hashlib.sha1(raw).hexdigest()[:16]
+
+
+def load_shapes():
+    """種別ごとのアート窓・可視マスク・枠テンプレート。無ければ shape 方式は使えない。"""
+    try:
+        con = open_db()
+    except DBMissing:
+        return {}
+    try:
+        rows = con.execute('SELECT * FROM shapes').fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        con.close()
+    out = {}
+    for r in rows:
+        if (r['mw'], r['mh'], r['fw'], r['fh']) != (SW, SH, FW, FH):
+            continue
+        m = np.frombuffer(r['mask'], np.uint8).reshape(SH, SW).astype(np.float32) / 255.0
+        out[r['ctype']] = {
+            's': float(r['s']), 'ox': float(r['ox']), 'oy': float(r['oy']),
+            'u0': float(r['u0']), 'v0': float(r['v0']),
+            'u1': float(r['u1']), 'v1': float(r['v1']),
+            'mask': m,
+            'cmask': m[span(SH, 0, 1, SCH)][:, span(SW, 0, 1, SCW)],
+            'frame': np.frombuffer(r['frame'], np.uint8)
+                       .reshape(FH, FW).astype(np.float32),
+            'fweight': np.frombuffer(r['fweight'], np.uint8)
+                         .reshape(FH, FW).astype(np.float32) / 255.0,
+        }
+        sh = out[r['ctype']]
+        sh['zframe'] = wznorm(sh['frame'].ravel(), sh['fweight'].ravel())
+    return out
 
 
 def build_index():
@@ -246,10 +408,20 @@ def build_index():
 
     vs = variants()
     key = cal_key() + ':' + hashlib.sha1((''.join(ids)).encode()).hexdigest()[:16]
-    coarse = _load_cache(key, (n, len(vs)))
+    coarse = _load_cache(CACHE_PATH, key, (n, len(vs), GW * GH * 5))
     if coarse is None:
         coarse = _build_coarse(gray, color, vs)
-        _save_cache(key, coarse)
+        _save_cache(CACHE_PATH, key, coarse)
+
+    shapes = load_shapes()
+    stype = np.array([t if t in shapes else SHAPE_FALLBACK for t in ctype])
+    scoarse = None
+    if shapes:
+        skey = key + ':shape:' + str(sorted(shapes))
+        scoarse = _load_cache(SHAPE_CACHE_PATH, skey, (n, SGW * SGH * 5))
+        if scoarse is None:
+            scoarse = _build_shape_coarse(gray, color, stype, shapes)
+            _save_cache(SHAPE_CACHE_PATH, skey, scoarse)
 
     return {
         'ids': ids, 'names': names, 'klass': klass, 'classes': classes,
@@ -261,6 +433,11 @@ def build_index():
         'edge': np.clip(edge_map(gray.astype(np.float32)), 0, 255).astype(np.uint8),
         'coarse': coarse.astype(np.float32),
         'variants': vs,
+        'shapes': shapes,
+        'stype': stype,
+        'trows': {t: np.flatnonzero(stype == t) for t in shapes},
+        'scoarse': scoarse,
+        'sjitter': shape_jitter(),
         'byid': {c: i for i, c in enumerate(ids)},
     }
 
@@ -321,28 +498,54 @@ def _build_coarse(gray, color, vs):
     return out
 
 
-def _load_cache(key, shape):
+def _build_shape_coarse(gray, color, stype, shapes):
+    """種別ごとの窓で切り出した粗特徴。変種は作らない（幾何が既知なので不要）。"""
+    n = gray.shape[0]
+    out = np.zeros((n, SGW * SGH * 5), dtype=np.uint8)
+    gf = gray.astype(np.float32)
+    cf = color.astype(np.float32)
+    for t, sh in shapes.items():
+        rows = np.flatnonzero(stype == t)
+        if rows.size == 0:
+            continue
+        x0, y0, x1, y1 = art_box(sh)
+        yi, xi = span(TG, y0, y1, SH), span(TG, x0, x1, SW)
+        ci, cj = span(TC, y0, y1, SCH), span(TC, x0, x1, SCW)
+        for a in range(0, rows.size, 1024):
+            r = rows[a:a + 1024]
+            g = gf[r][:, yi][:, :, xi]
+            c = cf[r][:, ci][:, :, cj]
+            out[r] = shape_coarse(g, c, sh['mask'], sh['cmask']).astype(np.uint8)
+    return out
+
+
+def _load_cache(path, key, shape):
+    key = hashlib.sha1(key.encode()).hexdigest()[:32]
     try:
-        with open(CACHE_PATH, 'rb') as f:
-            if f.read(16).decode() != key[:16]:
+        with open(path, 'rb') as f:
+            if f.read(32).decode() != key:
                 return None
-            k2 = f.read(16).decode()
-            if k2 != key[16:32]:
+            nd = struct.unpack('<I', f.read(4))[0]
+            if nd != len(shape):
                 return None
-            a, b, c = struct.unpack('<III', f.read(12))
-            if (a, b) != shape:
+            dims = struct.unpack('<%dI' % nd, f.read(4 * nd))
+            if dims != tuple(shape):
                 return None
-            return np.frombuffer(f.read(a * b * c), dtype=np.uint8).reshape(a, b, c)
-    except (OSError, ValueError, UnicodeDecodeError):
+            cnt = 1
+            for d in dims:
+                cnt *= d
+            return np.frombuffer(f.read(cnt), dtype=np.uint8).reshape(dims)
+    except (OSError, ValueError, UnicodeDecodeError, struct.error):
         return None
 
 
-def _save_cache(key, arr):
+def _save_cache(path, key, arr):
+    key = hashlib.sha1(key.encode()).hexdigest()[:32]
     try:
-        with open(CACHE_PATH, 'wb') as f:
-            f.write(key[:16].encode())
-            f.write(key[16:32].encode())
-            f.write(struct.pack('<III', *arr.shape))
+        with open(path, 'wb') as f:
+            f.write(key.encode())
+            f.write(struct.pack('<I', arr.ndim))
+            f.write(struct.pack('<%dI' % arr.ndim, *arr.shape))
             f.write(arr.tobytes())
     except OSError:
         pass
@@ -362,25 +565,61 @@ def invalidate():
         _idx = None
 
 
-# ------------------------------------------------------------ アート枠の校正
+# ------------------------------------------------------------ カード枠の校正
 
-def default_art():
-    return {k: dict(v) for k, v in ART_DEFAULT.items()}
+def default_card():
+    return {k: dict(v) for k, v in CARD_DEFAULT.items()}
 
 
-def load_art():
+def _rect(v):
+    if isinstance(v, dict) and all(isinstance(v.get(f), (int, float))
+                                   for f in ('x', 'y', 'w', 'h')):
+        return {f: float(v[f]) for f in ('x', 'y', 'w', 'h')}
+    return None
+
+
+def sub_rect(card, rel):
+    """カード枠の中の相対矩形（0..1）をフレーム比率へ直す。"""
+    return {'x': card['x'] + rel[0] * card['w'],
+            'y': card['y'] + rel[1] * card['h'],
+            'w': (rel[2] - rel[0]) * card['w'],
+            'h': (rel[3] - rel[1]) * card['h']}
+
+
+def art_rel(ctype=SHAPE_FALLBACK):
+    """カード枠に対するアート窓の位置。実測値が無ければ従来の既定値。"""
+    sh = index()['shapes'].get(ctype) if np is not None else None
+    if not sh:
+        return (0.250, 0.108, 0.738, 0.492)
+    return (sh['u0'], sh['v0'], sh['u1'], sh['v1'])
+
+
+def load_card():
+    """カード枠。旧形式（アート枠）しか無ければミニオンの窓から逆算する。"""
     try:
         with open(CALIB_PATH, encoding='utf-8') as f:
             saved = json.load(f)
     except (OSError, ValueError):
-        return default_art()
-    art = default_art()
+        return default_card()
+    out = default_card()
     for k in SLOT_KEYS:
-        v = (saved.get('art') or {}).get(k)
-        if isinstance(v, dict) and all(isinstance(v.get(f), (int, float))
-                                       for f in ('x', 'y', 'w', 'h')):
-            art[k] = {f: float(v[f]) for f in ('x', 'y', 'w', 'h')}
-    return art
+        v = _rect((saved.get('card') or {}).get(k))
+        if v:
+            out[k] = v
+            continue
+        old = _rect((saved.get('art') or {}).get(k))
+        if old:
+            u0, v0, u1, v1 = (0.250, 0.108, 0.738, 0.492)
+            w, h = old['w'] / (u1 - u0), old['h'] / (v1 - v0)
+            out[k] = {'x': old['x'] - u0 * w, 'y': old['y'] - v0 * h,
+                      'w': w, 'h': h}
+    return out
+
+
+def load_art():
+    """旧方式（長方形1種）用のアート枠。カード枠から割り出す。"""
+    rel = art_rel()
+    return {k: sub_rect(v, rel) for k, v in load_card().items()}
 
 
 def load_flip():
@@ -392,15 +631,13 @@ def load_flip():
         return True
 
 
-def save_art(art, flip=None):
-    clean = default_art()
+def save_card(card, flip=None):
+    clean = default_card()
     for k in SLOT_KEYS:
-        v = (art or {}).get(k)
-        if isinstance(v, dict):
-            for f in ('x', 'y', 'w', 'h'):
-                if isinstance(v.get(f), (int, float)):
-                    clean[k][f] = round(float(v[f]), 4)
-    payload = {'art': clean, 'flip': bool(load_flip() if flip is None else flip)}
+        v = _rect((card or {}).get(k))
+        if v:
+            clean[k] = {f: round(v[f], 4) for f in ('x', 'y', 'w', 'h')}
+    payload = {'card': clean, 'flip': bool(load_flip() if flip is None else flip)}
     with open(CALIB_PATH, 'w', encoding='utf-8') as f:
         json.dump(payload, f, ensure_ascii=False, indent=1)
     return payload
@@ -559,6 +796,7 @@ def query_descriptors(gray_bytes, color_bytes):
     g = np.frombuffer(gray_bytes, dtype=np.uint8).reshape(PH, PW).astype(np.float32)
     c = np.frombuffer(color_bytes, dtype=np.uint8).reshape(GH * 2, GW * 2, 3).astype(np.float32)
     return {
+        'method': 'rect',
         'coarse': coarse_from_patch(g, c),
         'gray': g.ravel(),
         'zgray': znorm(g.ravel()),
@@ -567,7 +805,344 @@ def query_descriptors(gray_bytes, color_bytes):
     }
 
 
-def recognize(q, hero, want_debug, correct_id, cost_hint=None, arena_only=False):
+def align_card(G):
+    """枠テンプレートに合わせて、カードの位置・大きさ・種別を決める。
+
+    手でドラッグした枠は必ずずれる。枠の絵はカードが変われば変わらないので、
+    種別ごとのレンダー中央値がそのままテンプレートになる。アートが見えている
+    画素は重みを落としてあるので、絵の中身には引きずられない。
+    戻り値はパッチ内の比率で (種別, x0, y0, 大きさ, 1位と2位の差)。
+    """
+    shapes = index()['shapes']
+    base = 1.0 / (1.0 + 2.0 * CARD_MARGIN)
+
+    def at(t, k, tx, ty):
+        s = base * k
+        x0, y0 = 0.5 + tx * base - s / 2, 0.5 + ty * base - s / 2
+        g = G[span(CARD_H, y0, y0 + s, FH)][:, span(CARD_W, x0, x0 + s, FW)].ravel()
+        sh = shapes[t]
+        w = sh['fweight'].ravel()
+        v = float((wznorm(g, w) * sh['zframe'] * w).sum() / (w.sum() + 1e-6))
+        return v, x0, y0, s
+
+    best = {}
+    for t in shapes:
+        top = None
+        for k in ALIGN_SCALES:
+            for tx in ALIGN_SHIFT:
+                for ty in ALIGN_SHIFT:
+                    r = at(t, k, tx, ty)
+                    if top is None or r[0] > top[0][0]:
+                        top = (r, (k, tx, ty))
+        best[t] = top
+
+    order = sorted(best.items(), key=lambda kv: -kv[1][0][0])
+
+    # 上位2種別だけ段階的に詰める。詰めてから比べないと、粗い格子の当たり外れが
+    # そのまま種別の確信差になってしまう。3位以下は逆転しない。
+    def refine(t, top):
+        for step in ALIGN_FINE:
+            k0, tx0, ty0 = top[1]
+            for dk in (-step, 0.0, step):
+                for dx in (-step, 0.0, step):
+                    for dy in (-step, 0.0, step):
+                        r = at(t, k0 + dk, tx0 + dx, ty0 + dy)
+                        if r[0] > top[0][0]:
+                            top = (r, (k0 + dk, tx0 + dx, ty0 + dy))
+        return top
+
+    tops = [(t, refine(t, v)) for t, v in order[:2]]
+    tops.sort(key=lambda kv: -kv[1][0][0])
+    t1, top = tops[0]
+    margin = (top[0][0] - tops[1][1][0][0]) if len(tops) > 1 else 1.0
+    r1 = top[0]
+    return t1, r1[1], r1[2], r1[3], margin
+
+
+def shape_descriptors(card_gray_bytes, card_color_bytes):
+    """カード全体のパッチから、種別ごとのアート窓パッチを作る。
+
+    どの種別かをクエリ側で当てる必要はない。DB はカードごとに種別を持っているので、
+    候補カード自身の種別の窓とマスクで採点すればよい。クエリ側は種別ぶん
+    （4通り）パッチを用意しておくだけで済む。枠合わせは種別に関係なく
+    1回だけ行い、その結果を全種別の窓に使う。
+    """
+    shapes = index()['shapes']
+    if not shapes:
+        raise DBMissing('種別ごとのアート窓がありません。'
+                        'python3 build_card_db.py --shapes を実行してください。')
+    G = np.frombuffer(card_gray_bytes, dtype=np.uint8).reshape(
+        CARD_H, CARD_W).astype(np.float32)
+    C = np.frombuffer(card_color_bytes, dtype=np.uint8).reshape(
+        CARD_CH, CARD_CW, 3).astype(np.float32)
+    ctype, cx0, cy0, cs, tmargin = align_card(G)
+    per = {}
+    for t, sh in shapes.items():
+        wx0, wx1 = cx0 + sh['u0'] * cs, cx0 + sh['u1'] * cs
+        wy0, wy1 = cy0 + sh['v0'] * cs, cy0 + sh['v1'] * cs
+        g = G[span(CARD_H, wy0, wy1, SH)][:, span(CARD_W, wx0, wx1, SW)]
+        c = C[span(CARD_CH, wy0, wy1, SCH)][:, span(CARD_CW, wx0, wx1, SCW)]
+        w = sh['mask'].ravel()
+        per[t] = {
+            'coarse': shape_coarse(g, c, sh['mask'], sh['cmask']),
+            'gray': g.ravel(),
+            'zgray': wznorm(g.ravel(), w),
+            'zedge': wznorm(edge_map(g).ravel(), w),
+            'color': c.reshape(-1),
+            'w': w, 'wsum': float(w.sum()),
+            'cw': np.repeat(sh['cmask'].ravel(), 3),
+            'window': [round(wx0, 4), round(wy0, 4), round(wx1, 4), round(wy1, 4)],
+        }
+        per[t]['cwsum'] = float(per[t]['cw'].sum())
+    return {'method': 'shape', 'card': G, 'per': per,
+            'ctype': ctype if tmargin >= TYPE_MIN_MARGIN else None,
+            'typeMargin': tmargin,
+            'rect': [round(cx0, 4), round(cy0, 4), round(cs, 4)]}
+
+
+def bilinear(a, x0, y0, x1, y1, ow, oh):
+    """a の矩形を ow x oh へ双線形で伸縮する。
+
+    マナ結晶のように 20〜30px しかないものを最近傍で伸縮すると列が飛んで、
+    テンプレート照合が当たらなくなる。
+    """
+    h, w = a.shape
+    xs = np.clip(np.linspace(x0 * w, x1 * w - 1, ow), 0, w - 1)
+    ys = np.clip(np.linspace(y0 * h, y1 * h - 1, oh), 0, h - 1)
+    x_i = np.floor(xs).astype(np.int32)
+    y_i = np.floor(ys).astype(np.int32)
+    x_n = np.minimum(x_i + 1, w - 1)
+    y_n = np.minimum(y_i + 1, h - 1)
+    fx = (xs - x_i)[None, :]
+    fy = (ys - y_i)[:, None]
+    top = a[y_i][:, x_i] * (1 - fx) + a[y_i][:, x_n] * fx
+    bot = a[y_n][:, x_i] * (1 - fx) + a[y_n][:, x_n] * fx
+    return top * (1 - fy) + bot * fy
+
+
+def shape_gem(gem_bytes, rect):
+    """原寸で送られた結晶まわりから、枠合わせの結果で結晶だけを切り出す。"""
+    if len(gem_bytes) != GEM_W * GEM_H:
+        return b''
+    G = np.frombuffer(gem_bytes, dtype=np.uint8).reshape(
+        GEM_H, GEM_W).astype(np.float32)
+    base = 1.0 / (1.0 + 2.0 * CARD_MARGIN)
+    b0 = CARD_MARGIN / (1.0 + 2.0 * CARD_MARGIN)
+    # パッチ内の比率 → 校正枠に対する比率
+    ax = (rect[0] - b0) / base
+    ay = (rect[1] - b0) / base
+    az = rect[2] / base
+    r = GEM_REL
+    gx0, gy0 = ax + r['x'] * az, ay + r['y'] * az
+    gx1, gy1 = gx0 + r['w'] * az, gy0 + r['h'] * az
+    px0, py0, px1, py1 = GEM_PAD
+    u0, u1 = (gx0 - px0) / (px1 - px0), (gx1 - px0) / (px1 - px0)
+    v0, v1 = (gy0 - py0) / (py1 - py0), (gy1 - py0) / (py1 - py0)
+    if not (0 <= u0 < u1 <= 1 and 0 <= v0 < v1 <= 1):
+        return b''
+    # 点サンプルだと数字の細い線が飛ぶので、粗く取ってから平均する
+    g = block_mean(bilinear(G, u0, v0, u1, v1, MANA_TW * 3, MANA_TH * 3), 3, 3)
+    return np.clip(g, 0, 255).astype(np.uint8).tobytes()
+
+
+def _finish(idx, mask, pool, cand, order1, keep, best, parts, hero,
+            correct_id, cost_hint, per_variant, extra):
+    """上位を並べて返す。Stage2 の採点方法が違っても結果の形は共通にする。"""
+    order2 = np.argsort(-best)
+    cands = []
+    seen = set()
+    prim, allm = arena_maps(hero)
+    for j in order2:
+        i = int(cand[j])
+        # 同じカードが CORE_ / VAN_ など別IDで何枚も入っている。アートが同一なので
+        # 区別しようがなく、並べても選べない。名前でまとめて一番良いものだけ出す。
+        name = idx['names'][i]
+        if name in seen:
+            continue
+        seen.add(name)
+        cid = idx['ids'][i]
+        c = {
+            'rank': len(cands) + 1,
+            'cardId': cid,
+            'name': name,
+            'cardClass': idx['klass'][i],
+            'cost': idx['cost'][i],
+            'type': idx['ctype'][i],
+            'finalScore': round(float(best[j]), 4),
+            'ssim': round(float(parts[j][0]), 4),
+            'edge': round(float(parts[j][1]), 4),
+            'color': round(float(parts[j][2]), 4),
+            'pixel': round(float(parts[j][3]), 4),
+            'variant': per_variant(j),
+        }
+        st = arena_stat(prim, allm, cid)
+        if st:
+            c['arena'] = st
+        if allm.get(cid):
+            c['arenaAll'] = allm[cid]
+        if prim and prim.get(cid):
+            c['arenaClass'] = prim[cid]
+        cands.append(c)
+        if len(cands) >= STAGE2_RETURN:
+            break
+
+    top1 = cands[0]['finalScore'] if cands else 0.0
+    gap = (top1 - cands[1]['finalScore']) if len(cands) > 1 else 1.0
+    if top1 < MIN_ACCEPT:
+        status = 'nomatch'
+    elif gap < CLOSE_GAP:
+        status = 'uncertain'
+    else:
+        status = 'ok'
+
+    res = {'status': status, 'gap': round(float(gap), 4),
+           'poolSize': int(pool.size), 'stage1Keep': int(keep),
+           'detectedCost': cost_hint,
+           'candidates': cands}
+    res.update(extra)
+
+    if correct_id and correct_id in idx['byid']:
+        ci_ = idx['byid'][correct_id]
+        r1 = int(np.flatnonzero(order1 == ci_)[0]) + 1 if (order1 == ci_).any() else -1
+        pos2 = np.flatnonzero(cand[order2] == ci_)
+        r2 = int(pos2[0]) + 1 if pos2.size else -1
+        res['correct'] = {
+            'cardId': correct_id,
+            'name': idx['names'][ci_],
+            'inPool': bool(mask[ci_]),
+            'stage1Rank': r1, 'stage1Total': int(pool.size),
+            'stage1Cutoff': int(keep),
+            'excludedAfterStage1': bool(r1 > keep or r1 < 0),
+            'stage2Rank': r2, 'stage2Total': int(keep),
+            'finalRank': r2,
+        }
+    return res
+
+
+def recognize(q, hero, want_debug, correct_id, cost_hint=None, arena_only=False,
+              type_hint=None):
+    if q.get('method') == 'shape':
+        return recognize_shape(q, hero, want_debug, correct_id, cost_hint,
+                               arena_only, type_hint)
+    return recognize_rect(q, hero, want_debug, correct_id, cost_hint, arena_only)
+
+
+def recognize_shape(q, hero, want_debug, correct_id, cost_hint=None,
+                    arena_only=False, type_hint=None):
+    """種別ごとのアート窓とマスクで照合する。
+
+    候補カードは自分の種別の窓で採点されるので、クエリの種別を当てる必要がない。
+    幾何は実測値で決まっているため、Stage1 に変種は要らない。校正のずれだけを
+    Stage2 で小さくずらして吸収する。
+    """
+    t0 = time.time()
+    idx = index()
+    shapes = idx['shapes']
+    if not shapes:
+        raise DBMissing('種別ごとのアート窓がありません。'
+                        'python3 build_card_db.py --shapes を実行してください。')
+    mask = eligible_mask(idx, hero, arena_only)
+    pool = np.flatnonzero(mask)
+    if pool.size == 0:
+        return {'status': 'empty', 'candidates': []}
+    t_mask = time.time()
+    log('      候補絞り込み %d枚  %.2fs' % (pool.size, t_mask - t0))
+
+    # ---- Stage1 ----  カードの種別に合った粗特徴どうしを比べる
+    s1all = np.full(idx['scoarse'].shape[0], 9e9, dtype=np.float32)
+    for t, rows in idx['trows'].items():
+        if rows.size == 0:
+            continue
+        cq = q['per'][t]['coarse']
+        for a in range(0, rows.size, 4096):
+            r = rows[a:a + 4096]
+            s1all[r] = np.abs(idx['scoarse'][r].astype(np.float32) - cq).mean(axis=1)
+    s1all = 1.0 - s1all / 255.0
+    s1all[~mask] = -1.0
+    order1 = np.argsort(-s1all)[:int(pool.size)]
+    keep = min(STAGE1_KEEP, order1.size)
+    cand = order1[:keep]
+    t_s1 = time.time()
+    log('      Stage1 完了 → %d枚  %.2fs' % (keep, t_s1 - t_mask))
+
+    # ---- Stage2 ----
+    ctypes = idx['stype'][cand]
+    groups = {t: np.flatnonzero(ctypes == t) for t in shapes}
+    groups = {t: r for t, r in groups.items() if r.size}
+    jits = idx['sjitter']
+    G = idx['gray'][cand].astype(np.float32)
+    C = idx['color'][cand].astype(np.float32)
+
+    def score(rows, t, k):
+        sh = shapes[t]
+        qd = q['per'][t]
+        x0, y0, x1, y1 = art_box(sh, jits[k])
+        yi, xi = span(TG, y0, y1, SH), span(TG, x0, x1, SW)
+        ci, cj = span(TC, y0, y1, SCH), span(TC, x0, x1, SCW)
+        g = G[rows][:, yi][:, :, xi]
+        col = C[rows][:, ci][:, :, cj].reshape(len(rows), -1)
+        flat = g.reshape(len(rows), -1)
+        ef = edge_map(g).reshape(len(rows), -1)
+        w, ws = qd['w'], qd['wsum']
+        cw, cws = qd['cw'], qd['cwsum']
+        ssim = (wznorm(flat, w) * (qd['zgray'] * w)).sum(axis=1) / ws
+        edge = (wznorm(ef, w) * (qd['zedge'] * w)).sum(axis=1) / ws
+        color = 1.0 - (np.abs(col - qd['color']) * cw).sum(axis=1) / cws / 255.0
+        pixel = 1.0 - (np.abs(flat - qd['gray']) * w).sum(axis=1) / ws / 255.0
+        f = W_SSIM * ssim + W_EDGE * edge + W_COLOR * color + W_PIXEL * pixel
+        return f, np.stack([ssim, edge, color, pixel], axis=1)
+
+    # ずれは3枚とも同じなので、上位だけで1つに決めてから全候補に同じ変種を使う
+    kbest, kscore = 0, -9e9
+    for k in range(len(jits)):
+        top = -9e9
+        for t, rows in groups.items():
+            probe = rows[:max(1, VARIANT_PROBE // max(1, len(groups)))]
+            f, _ = score(probe, t, k)
+            top = max(top, float(f.max()))
+        if top > kscore:
+            kscore, kbest = top, k
+
+    best = np.zeros(len(cand), dtype=np.float32)
+    parts = np.zeros((len(cand), 4), dtype=np.float32)
+    for t, rows in groups.items():
+        f, p = score(rows, t, kbest)
+        best[rows] = f
+        parts[rows] = p
+    # コストは加点に使わない。実機相当だと 1割誤読する一方、アート照合は
+    # この方式だと既に Top1 100% で、加点で得られるものがない。表示には使う。
+    if type_hint:
+        best = best + TYPE_BONUS * (ctypes == type_hint)
+    log('      Stage2 完了  %.2fs  (合計 %.2fs)'
+        % (time.time() - t_s1, time.time() - t0))
+
+    k, tx, ty = jits[kbest]
+
+    def per_variant(_j):
+        return {'scale': round(k, 3), 'ox': round(tx, 3), 'oy': round(ty, 3),
+                'h': round(k, 3)}
+
+    extra = {'method': 'shape', 'detectedType': type_hint,
+             'jitter': {'scale': k, 'tx': tx, 'ty': ty},
+             'cardRect': q.get('rect'),
+             'windows': {t: v['window'] for t, v in q['per'].items()}}
+    res = _finish(idx, mask, pool, cand, order1, keep, best, parts, hero,
+                  correct_id, cost_hint, per_variant, extra)
+    if want_debug:
+        res['debug'] = {
+            'shapes': {t: {'u0': s['u0'], 'v0': s['v0'],
+                           'u1': s['u1'], 'v1': s['v1'],
+                           'art': [round(v, 4) for v in art_box(s, jits[kbest])]}
+                       for t, s in shapes.items()},
+            'jitters': len(jits),
+            'patch': [SW, SH],
+            'weights': {'ssim': W_SSIM, 'edge': W_EDGE,
+                        'color': W_COLOR, 'pixel': W_PIXEL},
+        }
+    return res
+
+
+def recognize_rect(q, hero, want_debug, correct_id, cost_hint=None, arena_only=False):
     t0 = time.time()
     log('      recognize 開始')
     idx = index()
@@ -589,8 +1164,6 @@ def recognize(q, hero, want_debug, correct_id, cost_hint=None, arena_only=False)
     for a in range(0, n_all, 2048):
         blk = coarse[a:a + 2048]
         s1all[a:a + 2048] = np.abs(blk - cq).mean(axis=2).min(axis=1)
-        log('        Stage1 %d/%d  %.2fs' % (min(a + 2048, n_all), n_all,
-                                             time.time() - t_mask))
     s1all = 1.0 - s1all / 255.0
     s1all[~mask] = -1.0
     order1 = np.argsort(-s1all)[:int(pool.size)]
@@ -630,84 +1203,21 @@ def recognize(q, hero, want_debug, correct_id, cost_hint=None, arena_only=False)
         top = float(f.max())
         if top > kscore:
             kscore, kbest = top, k
-        if (k + 1) % 10 == 0 or k + 1 == len(vs):
-            log('        変種探索 %d/%d  %.2fs' % (k + 1, len(vs), time.time() - t_s1))
 
-    rows = np.arange(m)
-    best, parts = score(rows, kbest)
-    bestv = np.full(m, kbest, dtype=np.int32)
+    best, parts = score(np.arange(m), kbest)
     if cost_hint is not None:
         best = best + COST_BONUS * (idx['costarr'][cand] == cost_hint)
-        log('      コスト %d に加点 %.3f' % (cost_hint, COST_BONUS))
     log('      Stage2 完了  %.2fs  (合計 %.2fs)'
         % (time.time() - t_s1, time.time() - t0))
 
-    order2 = np.argsort(-best)
-    top = order2[:STAGE2_RETURN]
+    s, ox, oy, h = vs[kbest]
 
-    cands = []
-    prim, allm = arena_maps(hero)
-    for rank, j in enumerate(top, 1):
-        i = int(cand[j])
-        s, ox, oy, h = vs[int(bestv[j])]
-        cid = idx['ids'][i]
-        c = {
-            'rank': rank,
-            'cardId': cid,
-            'name': idx['names'][i],
-            'cardClass': idx['klass'][i],
-            'cost': idx['cost'][i],
-            'type': idx['ctype'][i],
-            'finalScore': round(float(best[j]), 4),
-            'ssim': round(float(parts[j][0]), 4),
-            'edge': round(float(parts[j][1]), 4),
-            'color': round(float(parts[j][2]), 4),
-            'pixel': round(float(parts[j][3]), 4),
-            'variant': {'scale': round(s, 3), 'ox': round(ox, 3),
-                        'oy': round(oy, 3), 'h': round(h, 3)},
-        }
-        st = arena_stat(prim, allm, cid)
-        if st:
-            c['arena'] = st
-        st_all = allm.get(cid)
-        if st_all:
-            c['arenaAll'] = st_all
-        st_cls = prim.get(cid) if prim else None
-        if st_cls:
-            c['arenaClass'] = st_cls
-        cands.append(c)
+    def per_variant(_j):
+        return {'scale': round(s, 3), 'ox': round(ox, 3),
+                'oy': round(oy, 3), 'h': round(h, 3)}
 
-    top1 = cands[0]['finalScore'] if cands else 0.0
-    top2 = cands[1]['finalScore'] if len(cands) > 1 else -1.0
-    gap = top1 - top2 if len(cands) > 1 else 1.0
-    if top1 < MIN_ACCEPT:
-        status = 'nomatch'
-    elif gap < CLOSE_GAP:
-        status = 'uncertain'
-    else:
-        status = 'ok'
-
-    res = {'status': status, 'gap': round(float(gap), 4),
-           'poolSize': int(pool.size), 'stage1Keep': int(keep),
-           'detectedCost': cost_hint,
-           'candidates': cands}
-
-    if correct_id and correct_id in idx['byid']:
-        ci_ = idx['byid'][correct_id]
-        r1 = int(np.flatnonzero(order1 == ci_)[0]) + 1 if (order1 == ci_).any() else -1
-        pos2 = np.flatnonzero(cand[order2] == ci_)
-        r2 = int(pos2[0]) + 1 if pos2.size else -1
-        res['correct'] = {
-            'cardId': correct_id,
-            'name': idx['names'][ci_],
-            'inPool': bool(mask[ci_]),
-            'stage1Rank': r1, 'stage1Total': int(pool.size),
-            'stage1Cutoff': int(keep),
-            'excludedAfterStage1': bool(r1 > keep or r1 < 0),
-            'stage2Rank': r2, 'stage2Total': int(keep),
-            'finalRank': r2,
-        }
-
+    res = _finish(idx, mask, pool, cand, order1, keep, best, parts, hero,
+                  correct_id, cost_hint, per_variant, {'method': 'rect'})
     if want_debug:
         res['debug'] = {
             'variants': len(vs),
@@ -720,16 +1230,18 @@ def recognize(q, hero, want_debug, correct_id, cost_hint=None, arena_only=False)
 
 # ------------------------------------------------------------------ PNG
 
-def png(rgb, w, h):
+def png(rgb, w, h, alpha=False):
     """Pillow を使わずに PNG を組み立てる（デバッグ表示用）。"""
-    raw = b''.join(b'\x00' + rgb[y * w * 3:(y + 1) * w * 3] for y in range(h))
+    n = 4 if alpha else 3
+    raw = b''.join(b'\x00' + rgb[y * w * n:(y + 1) * w * n] for y in range(h))
 
     def chunk(tag, data):
         c = tag + data
         return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c))
 
     return (b'\x89PNG\r\n\x1a\n'
-            + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+            + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8,
+                                         6 if alpha else 2, 0, 0, 0))
             + chunk(b'IDAT', zlib.compress(raw, 6))
             + chunk(b'IEND', b''))
 
@@ -785,7 +1297,7 @@ class Handler(SimpleHTTPRequestHandler):
             if u.path == '/api/info':
                 return self._info()
             if u.path == '/api/calibration':
-                return self._json({'ok': True, 'art': load_art(), 'flip': load_flip()})
+                return self._json(self._calib())
             if u.path == '/api/cards':
                 return self._cards(q)
             if u.path == '/api/arena':
@@ -794,6 +1306,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(deck_view(load_deck()))
             if u.path == '/api/thumb':
                 return self._thumb(q)
+            if u.path == '/api/mask':
+                return self._mask(q)
             if u.path == '/castframe':
                 return self._castframe(q)
             if u.path == '/':
@@ -818,13 +1332,32 @@ class Handler(SimpleHTTPRequestHandler):
         idx = index()
         info.update({'cards': len(idx['ids']), 'variants': len(idx['variants']),
                      'mana': int(idx['mana']['costs'].size) if idx.get('mana') else 0,
-                     'manaPatch': [MANA_TW, MANA_TH], 'manaRel': MANA_REL,
+                     'manaPatch': [MANA_TW, MANA_TH], 'gemRel': GEM_REL,
+                     'shapes': sorted(idx['shapes']),
+                     'shapePatch': [SW, SH],
+                     'cardPatch': [CARD_W, CARD_H, CARD_CW, CARD_CH],
+                     'jitters': len(idx['sjitter']),
                      'bytes': os.path.getsize(DB_PATH)})
         pool = arena_pool()
         info['arena'] = ({'total': len(pool['classes'].get('ALL', {})),
                           'ageSec': int(time.time() - pool['fetched'])}
                          if pool else None)
         return self._json(info)
+
+    def _calib(self):
+        """カード枠と、そこから割り出した種別ごとのアート窓。"""
+        out = {'ok': True, 'card': load_card(), 'flip': load_flip(),
+               'gemRel': GEM_REL, 'gemPad': GEM_PAD, 'gemPatch': [GEM_W, GEM_H],
+               'cardPatch': [CARD_W, CARD_H, CARD_CW, CARD_CH]}
+        try:
+            shapes = index()['shapes']
+        except (DBMissing, Exception):  # noqa: BLE001 - 校正だけは常に返す
+            shapes = {}
+        out['shapes'] = {t: {'u0': s['u0'], 'v0': s['v0'],
+                             'u1': s['u1'], 'v1': s['v1']}
+                         for t, s in shapes.items()}
+        out['art'] = load_art()
+        return out
 
     def _cards(self, q):
         idx = index()
@@ -871,14 +1404,26 @@ class Handler(SimpleHTTPRequestHandler):
         })
 
     def _thumb(self, q):
-        """DB側サムネを返す。変種を指定すると照合時と同じ切り出しで返す。"""
+        """DB側サムネを返す。変種や種別を指定すると照合時と同じ切り出しで返す。"""
         idx = index()
         cid = q.get('id', [''])[0]
         if cid not in idx['byid']:
             return self.send_error(404, 'unknown card')
         i = idx['byid'][cid]
         g = idx['gray'][i].astype(np.float32)
-        if 's' in q:
+        alpha = None
+        if 'ctype' in q:
+            # shape 方式で実際に比べた領域。マスクの外は暗く落として見せる
+            t = q['ctype'][0]
+            sh = idx['shapes'].get(t) or idx['shapes'].get(SHAPE_FALLBACK)
+            if sh is None:
+                return self.send_error(404, 'unknown shape')
+            jit = (float(q.get('k', ['1'])[0]), float(q.get('tx', ['0'])[0]),
+                   float(q.get('ty', ['0'])[0]))
+            x0, y0, x1, y1 = art_box(sh, jit)
+            g = g[span(TG, y0, y1, SH)][:, span(TG, x0, x1, SW)]
+            alpha = sh['mask']
+        elif 's' in q:
             s = float(q['s'][0])
             ox = float(q.get('ox', ['0'])[0])
             oy = float(q.get('oy', ['0'])[0])
@@ -888,9 +1433,27 @@ class Handler(SimpleHTTPRequestHandler):
         oh = max(8, min(512, int(q.get('h2', [str(int(ow * g.shape[0] / g.shape[1]))])[0])))
         yi = np.clip(np.linspace(0, g.shape[0] - 1, oh), 0, g.shape[0] - 1).astype(np.int32)
         xi = np.clip(np.linspace(0, g.shape[1] - 1, ow), 0, g.shape[1] - 1).astype(np.int32)
-        a = g[yi][:, xi].astype(np.uint8)
+        a = g[yi][:, xi]
+        if alpha is not None:
+            a = a * (0.18 + 0.82 * alpha[yi][:, xi])
+        a = a.astype(np.uint8)
         rgb = np.repeat(a[:, :, None], 3, axis=2)
         return self._bin(png(rgb.tobytes(), ow, oh), 'image/png',
+                         'public, max-age=3600')
+
+    def _mask(self, q):
+        """種別ごとの可視マスク。検証ページがクエリ側にも同じ形をかけるため。
+
+        CSS の mask-image は既定でアルファを見るので、輝度ではなくアルファに入れる。
+        """
+        sh = index()['shapes'].get(q.get('ctype', [''])[0])
+        if sh is None:
+            return self.send_error(404, 'unknown shape')
+        a = (sh['mask'] * 255).astype(np.uint8)
+        rgba = np.empty((SH, SW, 4), np.uint8)
+        rgba[..., :3] = 255
+        rgba[..., 3] = a
+        return self._bin(png(rgba.tobytes(), SW, SH, True), 'image/png',
                          'public, max-age=3600')
 
     def _deck(self, body):
@@ -965,9 +1528,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._shutdown()
             if u.path == '/api/calibration':
                 body = self._body()
-                saved = save_art(body.get('art'), body.get('flip'))
-                return self._json({'ok': True, 'art': saved['art'],
-                                   'flip': saved['flip']})
+                save_card(body.get('card'), body.get('flip'))
+                return self._json(self._calib())
             if u.path == '/api/deck':
                 return self._deck(self._body())
             if u.path != '/api/recognize':
@@ -976,27 +1538,52 @@ class Handler(SimpleHTTPRequestHandler):
             hero = str(body.get('hero', '') or '')
             debug = bool(body.get('debug'))
             arena_only = bool(body.get('arenaOnly'))
+            method = str(body.get('method') or 'shape')
             queries = body.get('queries') or []
             if not queries:
                 return self._json({'ok': False, 'error': 'queries が空です'}, 400)
+            if method == 'shape' and not index()['shapes']:
+                return self._json(
+                    {'ok': False,
+                     'error': '種別ごとのアート窓がありません。'
+                              'python3 build_card_db.py --shapes を実行してください。'}, 503)
 
             results = []
             t_all = time.time()
-            log('判定 %d枚  hero=%s%s'
-                % (len(queries), hero or 'ALL',
+            log('判定 %d枚  hero=%s  方式=%s%s'
+                % (len(queries), hero or 'ALL', method,
                    '  アリーナ対象のみ' if arena_only else ''))
             for n, item in enumerate(queries, 1):
-                gb = base64.b64decode(item.get('gray', ''))
-                cb = base64.b64decode(item.get('color', ''))
-                if len(gb) != PW * PH or len(cb) != (GW * 2) * (GH * 2) * 3:
-                    return self._json(
-                        {'ok': False,
-                         'error': 'query サイズ不一致 gray=%d(期待%d) color=%d(期待%d)'
-                                  % (len(gb), PW * PH, len(cb), (GW * 2) * (GH * 2) * 3)}, 400)
-                log('  [%d/%d] %s' % (n, len(queries), item.get('key', '')))
                 t1 = time.time()
-                qd = query_descriptors(gb, cb)
-                log('      query 変換 %.2fs' % (time.time() - t1))
+                type_hint = None
+                if method == 'shape':
+                    cg = base64.b64decode(item.get('card', ''))
+                    cc = base64.b64decode(item.get('cardColor', ''))
+                    if (len(cg) != CARD_W * CARD_H
+                            or len(cc) != CARD_CW * CARD_CH * 3):
+                        return self._json(
+                            {'ok': False,
+                             'error': 'card サイズ不一致 gray=%d(期待%d) color=%d(期待%d)'
+                                      % (len(cg), CARD_W * CARD_H,
+                                         len(cc), CARD_CW * CARD_CH * 3)}, 400)
+                    qd = shape_descriptors(cg, cc)
+                    type_hint = qd['ctype']
+                    log('      枠合わせ %s  種別 %s (確信差 %.3f)'
+                        % (qd['rect'], type_hint or '不明', qd['typeMargin']))
+                    gp = base64.b64decode(item.get('gem', '') or '')
+                    if gp:
+                        item = dict(item, mana=base64.b64encode(
+                            shape_gem(gp, qd['rect'])).decode())
+                else:
+                    gb = base64.b64decode(item.get('gray', ''))
+                    cb = base64.b64decode(item.get('color', ''))
+                    if len(gb) != PW * PH or len(cb) != (GW * 2) * (GH * 2) * 3:
+                        return self._json(
+                            {'ok': False,
+                             'error': 'query サイズ不一致 gray=%d(期待%d) color=%d(期待%d)'
+                                      % (len(gb), PW * PH, len(cb),
+                                         (GW * 2) * (GH * 2) * 3)}, 400)
+                    qd = query_descriptors(gb, cb)
                 cost_hint = None
                 mb = base64.b64decode(item.get('mana', '') or '')
                 if mb:
@@ -1007,7 +1594,7 @@ class Handler(SimpleHTTPRequestHandler):
                 r = recognize(qd, hero, debug,
                               str(item.get('correctId', '') or
                                   body.get('correctId', '') or ''),
-                              cost_hint, arena_only)
+                              cost_hint, arena_only, type_hint)
                 top = (r.get('candidates') or [{}])[0]
                 log('  [%d/%d] %s -> %s %s  %.2fs'
                     % (n, len(queries), item.get('key', ''), r.get('status'),
@@ -1017,8 +1604,10 @@ class Handler(SimpleHTTPRequestHandler):
             log('判定完了  合計 %.2fs' % (time.time() - t_all))
 
             return self._json({'ok': True, 'results': results,
+                               'method': method,
                                'stage1Keep': STAGE1_KEEP,
-                               'patch': [PW, PH], 'colorGrid': [GW * 2, GH * 2]})
+                               'patch': [PW, PH], 'colorGrid': [GW * 2, GH * 2],
+                               'shapePatch': [SW, SH]})
         except DBMissing as e:
             return self._json({'ok': False, 'error': str(e)}, 503)
         except Exception as e:  # noqa: BLE001
@@ -1081,6 +1670,11 @@ def main():
             idx = index()
             print('  カード    : %d 枚' % len(idx['ids']))
             print('  変種      : %d 通り／枚' % len(idx['variants']))
+            if idx['shapes']:
+                print('  アート窓  : %s' % ', '.join(sorted(idx['shapes'])))
+            else:
+                print('  !! 種別ごとのアート窓がありません。')
+                print('  !! python3 build_card_db.py --shapes を実行してください。')
         except Exception as e:  # noqa: BLE001
             print('  索引の構築に失敗:', e)
     pool = arena_pool()

@@ -37,8 +37,10 @@ button.primary{background:#238636;border-color:#238636}
   background:#3fb950;border:2px solid #0d1117;border-radius:50%;
   cursor:nwse-resize;touch-action:none}
 .box.mana{border-color:#1f6feb;border-style:dashed}
+.box.win{border-color:#58a6ff;border-radius:50%/42%;
+  box-shadow:0 0 0 1px rgba(13,17,23,.6) inset}
 .artPrev{display:none;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px;
-  max-width:620px}
+  max-width:420px}
 .artPrev figure{margin:0}
 .artPrev figcaption{font-size:11px;color:#9da7b3;text-align:center;margin-bottom:4px}
 .artPrev canvas{width:100%;height:auto;border-radius:7px;border:1px solid #30363d;
@@ -109,8 +111,10 @@ summary{cursor:pointer;font-weight:700}
   </div>
 </div>
   <p class="hint" id="ovHint" style="display:none">
-  緑の枠が認識に使うアート範囲です。<b>枠をドラッグで移動、右下の丸でサイズ変更</b>。
-  <b>3枚はそれぞれ独立</b>しているので1枚ずつ合わせられます。カードの絵だけが入るようにしてください。
+  <b>緑の枠はカード全体</b>です。カードの外周に合わせてください。
+  <b>枠をドラッグで移動、右下の丸でサイズ変更</b>。<b>3枚はそれぞれ独立</b>しています。
+  認識すると<b>実際に照合したアート窓が青い枠</b>で、マナ結晶が破線で出ます。
+  多少ずれてもサーバが枠の絵を手がかりに合わせ直します。
 </p>
 <div class="artPrev" id="artPrev">
   <figure><figcaption>左</figcaption><canvas></canvas></figure>
@@ -134,16 +138,25 @@ summary{cursor:pointer;font-weight:700}
   <button id="clearCorrect">クリア</button>
   <button id="run" class="primary">認識する</button>
 </div>
+<div class="row">
+  <label class="flipRow"><input type="radio" name="meth" value="shape" checked>
+    種別ごとのアート窓（新）</label>
+  <label class="flipRow"><input type="radio" name="meth" value="rect">
+    長方形ひとつ（従来）</label>
+</div>
 <div id="correctInfo" class="hint"></div>
 <div id="status" class="status"></div>
 
 <div id="out"></div>
 
 <details>
-  <summary>アート枠の調整（スクリーンショットモード）</summary>
-  <p class="hint">認識に使う切り取り範囲を、画面全体に対する比率で持ちます。左・中央・右で別々です。
-  設定はサーバに保存され、運用ページと iPad でもそのまま使われます。
-  全画面配信と分割表示で位置が変わるため、固定座標にしていません。</p>
+  <summary>カード枠の調整（スクリーンショットモード）</summary>
+  <p class="hint"><b>緑の枠はカード全体</b>です。カードの外周に合わせてください。
+  アートの形はミニオン＝縦長の楕円、呪文＝横長の角丸、武器＝円と種別ごとに
+  違うので、絵ではなくカードの外枠に合わせます。認識後は
+  <b>実際に照合したアート窓が青い枠</b>で出ます。
+  多少ずれてもサーバが枠の絵を手がかりに合わせ直します。
+  設定はサーバに保存され、運用ページと iPad でもそのまま使われます。</p>
   <div class="calibGrid">
     <span>X %</span><input type="range" id="ax" min="0" max="95" step="0.1"><b id="axv"></b>
     <span>Y %</span><input type="range" id="ay" min="0" max="95" step="0.1"><b id="ayv"></b>
@@ -164,6 +177,7 @@ summary{cursor:pointer;font-weight:700}
       <option value="middle">中央の枠</option>
       <option value="right">右の枠</option>
     </select>
+    <button id="fitRatio">カードの比率に合わせる</button>
     <button id="copyAll">この枠を3枚に適用</button>
     <button id="resetCal">初期値に戻す</button>
   </div>
@@ -181,39 +195,21 @@ const SLOTS = [
   { key: 'middle', label: '中央' },
   { key: 'right', label: '右' }
 ];
-// サーバ側の PW/PH, GW*2/GH*2 と一致させること
+// サーバ側の CARD_W/CARD_H・CARD_MARGIN と一致させること
+const CARD_W = 152, CARD_H = 230, CARD_CW = 38, CARD_CH = 58, CARD_MARGIN = 0.15;
+// 旧方式（長方形ひとつ）との比較用。サーバの PW/PH, GW*2/GH*2 と揃える
 const PW = 48, PH = 32, CW = 12, CH = 8;
-// マナ結晶。アート枠からの相対位置で求める。サーバの MANA_REL と揃えること
-const MW = 28, MH = 32;
-const MANA_REL = { x: -0.391, y: -0.191, w: 0.393, h: 0.492 };
+const CARD_ASPECT = 256 / 388;   // カードの縦横比は種別に関係なく一定
 
-function manaRect(key, iw, ih) {
-  const a = ART[key];
-  return {
-    x: (a.x + MANA_REL.x * a.w) * (iw || 1),
-    y: (a.y + MANA_REL.y * a.h) * (ih || 1),
-    w: MANA_REL.w * a.w * (iw || 1),
-    h: MANA_REL.h * a.h * (ih || 1)
-  };
-}
-function extractMana(src, r, iw, ih) {
-  if (r.x < 0 || r.y < 0 || r.x + r.w > iw || r.y + r.h > ih) return '';
-  const c = document.createElement('canvas');
-  c.width = MW; c.height = MH;
-  const cx = c.getContext('2d', { willReadFrequently: true });
-  cx.imageSmoothingQuality = 'high';
-  cx.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, MW, MH);
-  const d = cx.getImageData(0, 0, MW, MH).data;
-  const g = new Uint8Array(MW * MH);
-  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
-    g[j] = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
-  }
-  return toB64(g);
-}
-
-// 切り取り範囲はフレーム全体に対する比率。配信が全画面か分割表示かで
-// 位置が変わるため固定座標にしない。値はサーバに保存し iPad と共有する。
-let ART = null;
+// 切り取り枠はカード全体。アートの形はミニオン＝縦長の楕円、呪文＝横長の角丸、
+// 武器＝円と種別ごとに違うので「絵に合わせる」では合わせようがない。
+// カードの外枠なら種別に関係なく一意に決まり、そこからアート窓もマナ結晶も
+// サーバが実測値で割り出す。少しずれても枠テンプレートで合わせ直す。
+let CARD = null;
+let SHAPES = {};
+let GEM_REL = { x: 0.020, y: 0.040, w: 0.215, h: 0.175 };
+let GEM_PAD = [-0.10, -0.08, 0.34, 0.34];
+let GEM_W = 96, GEM_H = 120;
 let saveTimer = null;
 
 // 配信が 180° ひっくり返る場合の補正。表示も切り出しもこの補正後の画像を見る。
@@ -240,35 +236,122 @@ function frameSrc() {
   return FLIP ? $('view') : IMG;
 }
 
-async function loadArt() {
+async function loadCal() {
   try {
     const j = await (await fetch('/api/calibration')).json();
-    if (j.ok && j.art) ART = j.art;
-    if (j.ok) FLIP = !!j.flip;
+    if (j.ok) {
+      if (j.card) CARD = j.card;
+      if (j.shapes) SHAPES = j.shapes;
+      if (j.gemRel) GEM_REL = j.gemRel;
+      if (j.gemPad) GEM_PAD = j.gemPad;
+      if (j.gemPatch) { GEM_W = j.gemPatch[0]; GEM_H = j.gemPatch[1]; }
+      FLIP = !!j.flip;
+    }
   } catch (e) { /* サーバに届かない場合は後で既定値 */ }
-  if (!ART) {
-    ART = { left:   { x: 0.150, y: 0.204, w: 0.073, h: 0.104 },
-            middle: { x: 0.308, y: 0.204, w: 0.077, h: 0.101 },
-            right:  { x: 0.473, y: 0.207, w: 0.073, h: 0.096 } };
+  if (!CARD) {
+    CARD = { left:   { x: 0.113, y: 0.175, w: 0.150, h: 0.271 },
+             middle: { x: 0.269, y: 0.176, w: 0.158, h: 0.263 },
+             right:  { x: 0.436, y: 0.180, w: 0.150, h: 0.250 } };
   }
 }
-function saveArt() {
+function saveCal() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     fetch('/api/calibration', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ art: ART, flip: FLIP })
+      body: JSON.stringify({ card: CARD, flip: FLIP })
     }).catch(() => {});
   }, 400);
 }
-function artRect(key, iw, ih) {
-  const a = ART[key];
-  return { x: a.x * iw, y: a.y * ih, w: a.w * iw, h: a.h * ih };
+function cardRect(key, iw, ih) {
+  const a = CARD[key];
+  return { x: a.x * (iw || 1), y: a.y * (ih || 1),
+           w: a.w * (iw || 1), h: a.h * (ih || 1) };
+}
+// サーバが枠テンプレートで合わせ直せるよう、まわりに余白を付けて送る
+function grabRect(key, iw, ih) {
+  const a = CARD[key], m = CARD_MARGIN;
+  return { x: (a.x - m * a.w) * (iw || 1), y: (a.y - m * a.h) * (ih || 1),
+           w: a.w * (1 + 2 * m) * (iw || 1), h: a.h * (1 + 2 * m) * (ih || 1) };
+}
+// カード枠に対する相対矩形(0..1)をフレーム比率へ直す
+function relRect(key, r, iw, ih) {
+  const a = CARD[key];
+  return { x: (a.x + r[0] * a.w) * (iw || 1), y: (a.y + r[1] * a.h) * (ih || 1),
+           w: (r[2] - r[0]) * a.w * (iw || 1),
+           h: (r[3] - r[1]) * a.h * (ih || 1) };
+}
+function artWin(key, type, iw, ih) {
+  const s = SHAPES[type] || SHAPES.MINION;
+  return s ? relRect(key, [s.u0, s.v0, s.u1, s.v1], iw, ih) : null;
+}
+function gemRect(key, iw, ih) {
+  return relRect(key, [GEM_REL.x, GEM_REL.y, GEM_REL.x + GEM_REL.w,
+                       GEM_REL.y + GEM_REL.h], iw, ih);
+}
+// サーバが返す「合わせ直したあとの枠」はパッチ内の比率。フレーム比率へ戻す
+function alignedRect(key, rect) {
+  if (!rect) return null;
+  const b = grabRect(key);
+  return { x: b.x + rect[0] * b.w, y: b.y + rect[1] * b.h,
+           w: rect[2] * b.w, h: rect[2] * b.h };
+}
+function alignedWin(key, win) {
+  if (!win) return null;
+  const b = grabRect(key);
+  return { x: b.x + win[0] * b.w, y: b.y + win[1] * b.h,
+           w: (win[2] - win[0]) * b.w, h: (win[3] - win[1]) * b.h };
 }
 function toB64(u8) {
   let s = '';
   for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
   return btoa(s);
+}
+function extractCard(src, r) {
+  const mid = document.createElement('canvas');
+  mid.width = CARD_W * 2; mid.height = CARD_H * 2;
+  const mc = mid.getContext('2d', { willReadFrequently: true });
+  mc.imageSmoothingEnabled = true; mc.imageSmoothingQuality = 'high';
+  mc.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, mid.width, mid.height);
+
+  const gc = document.createElement('canvas');
+  gc.width = CARD_W; gc.height = CARD_H;
+  const g2 = gc.getContext('2d', { willReadFrequently: true });
+  g2.imageSmoothingQuality = 'high';
+  g2.drawImage(mid, 0, 0, CARD_W, CARD_H);
+  const gd = g2.getImageData(0, 0, CARD_W, CARD_H).data;
+  const gray = new Uint8Array(CARD_W * CARD_H);
+  for (let i = 0, j = 0; i < gd.length; i += 4, j++) {
+    gray[j] = (0.299 * gd[i] + 0.587 * gd[i + 1] + 0.114 * gd[i + 2]) | 0;
+  }
+
+  const cc = document.createElement('canvas');
+  cc.width = CARD_CW; cc.height = CARD_CH;
+  const c2 = cc.getContext('2d', { willReadFrequently: true });
+  c2.imageSmoothingQuality = 'high';
+  c2.drawImage(mid, 0, 0, CARD_CW, CARD_CH);
+  const cd = c2.getImageData(0, 0, CARD_CW, CARD_CH).data;
+  const color = new Uint8Array(CARD_CW * CARD_CH * 3);
+  for (let i = 0, j = 0; i < cd.length; i += 4) {
+    color[j++] = cd[i]; color[j++] = cd[i + 1]; color[j++] = cd[i + 2];
+  }
+  return { card: toB64(gray), cardColor: toB64(color) };
+}
+// マナ結晶はカードの 0.2 ほどしかなく、カード全体のパッチ経由だと数字が潰れる。
+// まわりを広めに原寸で送り、枠合わせの結果でサーバが切り直す。
+function extractGem(src, key, iw, ih) {
+  const r = relRect(key, GEM_PAD, iw, ih);
+  const c = document.createElement('canvas');
+  c.width = GEM_W; c.height = GEM_H;
+  const cx = c.getContext('2d', { willReadFrequently: true });
+  cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = 'high';
+  cx.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, GEM_W, GEM_H);
+  const d = cx.getImageData(0, 0, GEM_W, GEM_H).data;
+  const g = new Uint8Array(GEM_W * GEM_H);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    g[j] = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+  }
+  return toB64(g);
 }
 function extract(src, r) {
   const mid = document.createElement('canvas');
@@ -305,11 +388,13 @@ function extract(src, r) {
   return { gray: toB64(gray), color: toB64(color),
            preview: pv.toDataURL('image/png'), grayArr: gray };
 }
-async function recognize(queries, hero, debug, correctId) {
+async function recognize(queries, hero, debug, correctId, method) {
   const res = await fetch('/api/recognize', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ queries, hero, debug: !!debug, correctId: correctId || '' })
+    body: JSON.stringify({ queries, hero, debug: !!debug,
+                           method: method || 'shape',
+                           correctId: correctId || '' })
   });
   const j = await res.json().catch(() => ({ ok: false, error: 'HTTP ' + res.status }));
   if (!j.ok) throw new Error(j.error || ('HTTP ' + res.status));
@@ -379,19 +464,18 @@ $('stage').addEventListener('contextmenu', e => e.preventDefault());
 /// 変形後の値を返すので、ドラッグの計算はそのままで正しく動く。
 function applyZoom() {
   const z = $('zoom'), stage = $('stage');
-  if (!ART || !IMG || !$('zoomOn').checked || mode() !== 'shot') {
+  if (!CARD || !IMG || !$('zoomOn').checked || mode() !== 'shot') {
     z.style.transform = '';
     stage.style.height = '';
     return;
   }
   let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
   SLOTS.forEach(s => {
-    const a = ART[s.key], m = manaRect(s.key);
-    x0 = Math.min(x0, a.x, m.x); y0 = Math.min(y0, a.y, m.y);
-    x1 = Math.max(x1, a.x + a.w, m.x + m.w);
-    y1 = Math.max(y1, a.y + a.h, m.y + m.h);
+    const a = CARD[s.key];
+    x0 = Math.min(x0, a.x); y0 = Math.min(y0, a.y);
+    x1 = Math.max(x1, a.x + a.w); y1 = Math.max(y1, a.y + a.h);
   });
-  const pad = 0.015;
+  const pad = 0.02;
   x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad);
   x1 = Math.min(1, x1 + pad); y1 = Math.min(1, y1 + pad);
   const k = 1 / Math.max(x1 - x0, 0.02);
@@ -400,19 +484,25 @@ function applyZoom() {
   stage.style.height = (w * (IMG.naturalHeight / IMG.naturalWidth) * (y1 - y0) * k) + 'px';
 }
 
-// ---------- アート枠のオーバーレイ ----------
+// ---------- カード枠のオーバーレイ ----------
+// 緑＝カード枠（ドラッグ対象）、青＝実際に照合したアート窓、破線＝マナ結晶
 function drawOverlay() {
-  const on = IMG && mode() === 'shot' && ART;
+  const on = IMG && mode() === 'shot' && CARD;
   $('ov').style.display = on ? 'block' : 'none';
   $('ovHint').style.display = on ? 'block' : 'none';
   $('artPrev').style.display = on ? 'grid' : 'none';
   if (!on) { $('ov').innerHTML = ''; return; }
   const sel = $('calSlot').value;
-  $('ov').innerHTML = SLOTS.map(s => {
-    const a = ART[s.key];
-    const m = manaRect(s.key);
-    return '<div class="box mana" style="left:' + (m.x * 100) + '%;top:' + (m.y * 100) +
-      '%;width:' + (m.w * 100) + '%;height:' + (m.h * 100) + '%"></div>' +
+  $('ov').innerHTML = SLOTS.map((s, i) => {
+    const a = CARD[s.key];
+    const g = relRect(s.key, [GEM_REL.x, GEM_REL.y, GEM_REL.x + GEM_REL.w,
+                              GEM_REL.y + GEM_REL.h]);
+    const r = LAST[i] || {};
+    const w = alignedWin(s.key, (r.windows || {})[r.detectedType || 'MINION'])
+      || artWin(s.key, 'MINION');
+    const box = (cls, q) => '<div class="box ' + cls + '" style="left:' + (q.x * 100) +
+      '%;top:' + (q.y * 100) + '%;width:' + (q.w * 100) + '%;height:' + (q.h * 100) + '%"></div>';
+    return (w ? box('win', w) : '') + box('mana', g) +
       '<div class="box art' + (s.key === sel ? ' on' : '') + '" data-key="' + s.key +
       '" style="left:' + (a.x * 100) + '%;top:' + (a.y * 100) +
       '%;width:' + (a.w * 100) + '%;height:' + (a.h * 100) +
@@ -424,12 +514,12 @@ function drawOverlay() {
 }
 
 function updateArtPreview() {
-  if (!IMG || !ART) return;
+  if (!IMG || !CARD) return;
   const src = frameSrc();
   $('artPrev').querySelectorAll('canvas').forEach((cv, i) => {
-    const r = artRect(SLOTS[i].key, IMG.naturalWidth, IMG.naturalHeight);
-    cv.width = 192; cv.height = 128;
-    cv.getContext('2d').drawImage(src, r.x, r.y, r.w, r.h, 0, 0, 192, 128);
+    const r = cardRect(SLOTS[i].key, IMG.naturalWidth, IMG.naturalHeight);
+    cv.width = 128; cv.height = 194;
+    cv.getContext('2d').drawImage(src, r.x, r.y, r.w, r.h, 0, 0, 128, 194);
   });
 }
 
@@ -442,7 +532,7 @@ function bindDrag() {
       const key = el.dataset.key;
       $('calSlot').value = key;
       drag = {
-        key, box, from: Object.assign({}, ART[key]),
+        key, box, from: Object.assign({}, CARD[key]),
         mode: ev.target.tagName === 'U' ? 'size' : 'move',
         px: ev.clientX, py: ev.clientY
       };
@@ -456,11 +546,11 @@ function bindDrag() {
       const a = drag.from;
       const cl = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
       const rd = v => Math.round(v * 10000) / 10000;
-      ART[drag.key] = drag.mode === 'move'
+      CARD[drag.key] = drag.mode === 'move'
         ? { x: rd(cl(a.x + dx, 0, 1 - a.w)), y: rd(cl(a.y + dy, 0, 1 - a.h)), w: a.w, h: a.h }
         : { x: a.x, y: a.y,
             w: rd(cl(a.w + dx, 0.02, 1 - a.x)), h: rd(cl(a.h + dy, 0.02, 1 - a.y)) };
-      saveArt(); syncCal(); drawOverlay();
+      saveCal(); syncCal(); drawOverlay();
       ev.preventDefault();
     });
     el.addEventListener('pointerup', () => { drag = null; });
@@ -502,90 +592,138 @@ document.addEventListener('click', e => {
 });
 
 // ---------- 認識 ----------
+let LAST = [];
+
 $('run').onclick = async () => {
   if (!IMG) { $('status').textContent = '先に画像を読み込んでください。'; return; }
   $('status').textContent = '認識中…';
   $('out').innerHTML = '';
+  LAST = [];
   try {
-    let qs;
+    const meth = document.querySelector('input[name=meth]:checked').value;
     const src = frameSrc();
+    const iw = IMG.naturalWidth, ih = IMG.naturalHeight;
+    let qs;
     if (mode() === 'art') {
-      const e = extract(src, { x: 0, y: 0, w: IMG.naturalWidth, h: IMG.naturalHeight });
-      qs = [{ key: 'art', label: 'アート画像', gray: e.gray, color: e.color,
+      // アート画像1枚モードは種別ごとの窓を切りようがないので旧方式で照合する
+      const e = extract(src, { x: 0, y: 0, w: iw, h: ih });
+      qs = [{ key: 'art', label: 'アート画像', method: 'rect',
+              gray: e.gray, color: e.color,
               preview: e.preview, grayArr: e.grayArr }];
     } else {
       qs = SLOTS.map(s => {
-        const r = artRect(s.key, IMG.naturalWidth, IMG.naturalHeight);
-        const e = extract(src, r);
-        const m = extractMana(src, manaRect(s.key, IMG.naturalWidth, IMG.naturalHeight),
-                              IMG.naturalWidth, IMG.naturalHeight);
-        return { key: s.key, label: s.label, gray: e.gray, color: e.color, mana: m,
-                 preview: e.preview, grayArr: e.grayArr };
+        const big = grabRect(s.key, iw, ih);
+        const card = extractCard(src, big);
+        const e = extract(src, relRect(s.key,
+          [SHAPES.MINION ? SHAPES.MINION.u0 : 0.25, SHAPES.MINION ? SHAPES.MINION.v0 : 0.108,
+           SHAPES.MINION ? SHAPES.MINION.u1 : 0.738, SHAPES.MINION ? SHAPES.MINION.v1 : 0.492],
+          iw, ih));
+        return { key: s.key, label: s.label, method: meth,
+                 card: card.card, cardColor: card.cardColor,
+                 gem: extractGem(src, s.key, iw, ih),
+                 gray: e.gray, color: e.color,
+                 preview: e.preview, grayArr: e.grayArr, big: big };
       });
     }
     const t0 = performance.now();
+    const useMeth = qs[0].method;
     const res = await recognize(
-      qs.map(q => ({ key: q.key, gray: q.gray, color: q.color, mana: q.mana || '' })),
-      $('hero').value, true, CORRECT ? CORRECT.id : '');
+      qs.map(q => useMeth === 'shape'
+        ? { key: q.key, card: q.card, cardColor: q.cardColor, gem: q.gem || '' }
+        : { key: q.key, gray: q.gray, color: q.color }),
+      $('hero').value, true, CORRECT ? CORRECT.id : '', useMeth);
     const ms = Math.round(performance.now() - t0);
+    LAST = res.results;
     render(res, qs);
-    $('status').textContent = '完了  ' + ms + 'ms  /  候補 ' +
-      (res.results[0] ? res.results[0].poolSize : 0) + ' 枚  /  Stage1通過 ' +
-      res.stage1Keep + ' 枚';
+    drawOverlay();
+    $('status').textContent = '完了  ' + ms + 'ms  /  方式 ' + res.method +
+      '  /  候補 ' + (res.results[0] ? res.results[0].poolSize : 0) +
+      ' 枚  /  Stage1通過 ' + res.stage1Keep + ' 枚';
   } catch (e) {
     $('status').textContent = 'エラー: ' + e.message;
   }
 };
 
+// 実際に照合した領域を切り出して見せる。ズレていればここで一目で分かる。
+function queryPatch(q, r) {
+  const cv = document.createElement('canvas');
+  cv.width = 160; cv.height = 160;
+  const cx = cv.getContext('2d');
+  const win = r.windows && r.windows[r.detectedType || 'MINION'];
+  if (!win || !q.big) return q.preview;
+  const b = q.big;
+  cx.drawImage(frameSrc(),
+    b.x + win[0] * b.w, b.y + win[1] * b.h,
+    (win[2] - win[0]) * b.w, (win[3] - win[1]) * b.h, 0, 0, 160, 160);
+  return cv.toDataURL('image/png');
+}
+
 function render(res, qs) {
   $('out').innerHTML = res.results.map((r, i) => {
     const q = qs[i];
     const top = r.candidates[0];
-    const bestSrc = top
-      ? '/api/thumb?id=' + encodeURIComponent(top.cardId) +
-        '&s=' + top.variant.scale + '&ox=' + top.variant.ox +
-        '&oy=' + top.variant.oy + '&h=' + top.variant.h + '&w=192&h2=128'
+    const shape = r.method === 'shape';
+    const bestSrc = !top ? ''
+      : shape
+        ? '/api/thumb?id=' + encodeURIComponent(top.cardId) +
+          '&ctype=' + encodeURIComponent(top.type) +
+          '&k=' + r.jitter.scale + '&tx=' + r.jitter.tx + '&ty=' + r.jitter.ty +
+          '&w=160&h2=160'
+        : '/api/thumb?id=' + encodeURIComponent(top.cardId) +
+          '&s=' + top.variant.scale + '&ox=' + top.variant.ox +
+          '&oy=' + top.variant.oy + '&h=' + top.variant.h + '&w=192&h2=128';
+    const qsrc = shape ? queryPatch(q, r) : q.preview;
+    const qmask = shape && r.detectedType
+      ? ';-webkit-mask-image:url(/api/mask?ctype=' + encodeURIComponent(r.detectedType) +
+        ');mask-image:url(/api/mask?ctype=' + encodeURIComponent(r.detectedType) +
+        ');-webkit-mask-size:100% 100%;mask-size:100% 100%'
       : '';
     const rows = r.candidates.map(c =>
       '<tr class="' + (c.rank === 1 ? 'best' : '') + '">' +
       '<td>' + c.rank + '</td>' +
       '<td>' + esc(c.name) + '</td>' +
-      '<td class="hint">' + esc(c.cardId) + '</td>' +
+      '<td class="hint">' + esc(c.type) + '</td>' +
       '<td><b>' + c.finalScore.toFixed(3) + '</b></td>' +
       '<td>' + c.ssim.toFixed(3) + '</td>' +
       '<td>' + c.edge.toFixed(3) + '</td>' +
       '<td>' + c.color.toFixed(3) + '</td>' +
       '<td>' + c.pixel.toFixed(3) + '</td>' +
-      '<td class="hint">' + c.variant.scale + ' / ' + c.variant.ox +
-      ' / ' + c.variant.oy + '</td></tr>').join('');
+      '<td class="hint">' + esc(c.cardId) + '</td></tr>').join('');
     return '<section class="slot" data-i="' + i + '">' +
       '<div class="slotHead"><h3>' + esc(q.label) + '</h3>' +
       '<span class="badge ' + r.status + '">' + STATUS_LABEL[r.status] + '</span>' +
+      '<span class="hint">方式 ' + esc(r.method || 'rect') + '</span>' +
+      (shape ? '<span class="hint">枠から読んだ種別 ' +
+        esc(r.detectedType || '不明') + '</span>' : '') +
       (r.detectedCost !== null && r.detectedCost !== undefined
         ? '<span class="hint">読み取ったマナ ' + r.detectedCost + '</span>'
         : '<span class="hint">マナ不明</span>') +
       '<span class="hint">1位と2位の差 ' + r.gap.toFixed(3) + '</span></div>' +
       '<div class="cmp">' +
-      '<figure><figcaption>Query（認識に使った画像）</figcaption>' +
-      '<img src="' + q.preview + '" alt=""></figure>' +
-      '<figure><figcaption>Best match（DB側・勝ち変種）</figcaption>' +
+      '<figure><figcaption>Query（実際に比べた領域）</figcaption>' +
+      '<img src="' + qsrc + '" style="background:#000' + qmask + '" alt=""></figure>' +
+      '<figure><figcaption>Best match（DB側・同じ窓とマスク）</figcaption>' +
       (bestSrc ? '<img class="best" src="' + bestSrc + '" alt="">' : '<canvas></canvas>') +
       '</figure>' +
       '<figure><figcaption>Difference</figcaption><canvas class="diff"></canvas></figure>' +
       '</div>' +
-      '<table><thead><tr><th>#</th><th>カード名</th><th>Card ID</th><th>Final</th>' +
+      '<table><thead><tr><th>#</th><th>カード名</th><th>種別</th><th>Final</th>' +
       '<th>SSIM</th><th>Edge</th><th>Color</th><th>Pixel</th>' +
-      '<th>scale/ox/oy</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+      '<th>Card ID</th></tr></thead><tbody>' + rows + '</tbody></table>' +
       stageBlock(r) + '</section>';
   }).join('');
 
-  // Difference は Best match の読み込み完了後に描く
+  // Difference は Query / Best match の読み込み完了後に描く
   res.results.forEach((r, i) => {
     const sec = $('out').querySelector('[data-i="' + i + '"]');
     const best = sec.querySelector('img.best');
-    if (!best) return;
-    const draw = () => drawDiff(sec.querySelector('canvas.diff'), qs[i].grayArr, best);
-    if (best.complete) draw(); else best.onload = draw;
+    const qimg = sec.querySelector('.cmp img');
+    if (!best || !qimg) return;
+    const draw = () => {
+      if (!best.complete || !qimg.complete) return;
+      drawDiff(sec.querySelector('canvas.diff'), qimg, best);
+    };
+    best.onload = draw; qimg.onload = draw; draw();
   });
 }
 
@@ -614,24 +752,27 @@ function stageBlock(r) {
   return s + '</div>';
 }
 
-function drawDiff(cv, grayArr, bestImg) {
-  if (!cv || !grayArr) return;
-  cv.width = PW; cv.height = PH;
+function drawDiff(cv, qImg, bestImg) {
+  if (!cv || !qImg || !bestImg.naturalWidth) return;
+  const W = 80, H = 80;
+  cv.width = W; cv.height = H;
   const ctx = cv.getContext('2d', { willReadFrequently: true });
-  const tmp = document.createElement('canvas');
-  tmp.width = PW; tmp.height = PH;
-  const tc = tmp.getContext('2d', { willReadFrequently: true });
-  tc.drawImage(bestImg, 0, 0, PW, PH);
-  const b = tc.getImageData(0, 0, PW, PH).data;
+  const grab = img => {
+    const t = document.createElement('canvas');
+    t.width = W; t.height = H;
+    t.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, W, H);
+    return t.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+  };
+  const a = grab(qImg), b = grab(bestImg);
 
   // 明るさの差は正規化してから比べる。照明差ではなく構図差を見たいため。
-  let qs = 0, bs = 0;
-  for (let i = 0; i < PW * PH; i++) { qs += grayArr[i]; bs += b[i * 4]; }
-  const dq = qs / (PW * PH) - bs / (PW * PH);
+  let as = 0, bs = 0;
+  for (let i = 0; i < W * H; i++) { as += a[i * 4]; bs += b[i * 4]; }
+  const d0 = (as - bs) / (W * H);
 
-  const out = ctx.createImageData(PW, PH);
-  for (let i = 0; i < PW * PH; i++) {
-    const d = Math.min(255, Math.abs(grayArr[i] - (b[i * 4] + dq)) * 2);
+  const out = ctx.createImageData(W, H);
+  for (let i = 0; i < W * H; i++) {
+    const d = Math.min(255, Math.abs(a[i * 4] - (b[i * 4] + d0)) * 2);
     out.data[i * 4] = d;
     out.data[i * 4 + 1] = 255 - d;
     out.data[i * 4 + 2] = 40;
@@ -642,54 +783,67 @@ function drawDiff(cv, grayArr, bestImg) {
 
 // ---------- 校正 ----------
 function syncCal() {
-  const a = ART[$('calSlot').value];
+  const a = CARD[$('calSlot').value];
   [['ax', a.x], ['ay', a.y], ['aw', a.w], ['ah', a.h]].forEach(([id, v]) => {
     $(id).value = v * 100;
     $(id + 'v').textContent = (v * 100).toFixed(1);
   });
 }
 ['ax', 'ay', 'aw', 'ah'].forEach(id => $(id).addEventListener('input', () => {
-  ART[$('calSlot').value] = {
+  CARD[$('calSlot').value] = {
     x: +$('ax').value / 100, y: +$('ay').value / 100,
     w: +$('aw').value / 100, h: +$('ah').value / 100
   };
-  saveArt(); syncCal(); drawOverlay();
+  saveCal(); syncCal(); drawOverlay();
 }));
 $('calSlot').onchange = () => { syncCal(); drawOverlay(); };
 $('zoomOn').onchange = applyZoom;
 window.addEventListener('resize', applyZoom);
+// カードの縦横比は 256:388 で決まっている。高さを幅に合わせて直す
+$('fitRatio').onclick = () => {
+  if (!IMG) { $('status').textContent = '先に画像を読み込んでください。'; return; }
+  const k = $('calSlot').value, a = CARD[k];
+  const h = a.w * (IMG.naturalWidth / IMG.naturalHeight) / CARD_ASPECT;
+  CARD[k] = { x: a.x, y: a.y, w: a.w, h: Math.round(h * 10000) / 10000 };
+  saveCal(); syncCal(); drawOverlay();
+};
 $('flip').onchange = () => {
   FLIP = $('flip').checked;
   applyFlip();
-  saveArt();
+  saveCal();
   drawOverlay();
 };
 $('copyAll').onclick = () => {
   // 大きさだけ揃える。X はカードごとに違うので維持する。
-  const a = ART[$('calSlot').value];
+  const a = CARD[$('calSlot').value];
   SLOTS.forEach(s => {
-    ART[s.key] = { x: ART[s.key].x, y: a.y, w: a.w, h: a.h };
+    CARD[s.key] = { x: CARD[s.key].x, y: a.y, w: a.w, h: a.h };
   });
-  saveArt(); syncCal(); drawOverlay();
+  saveCal(); syncCal(); drawOverlay();
 };
 $('resetCal').onclick = async () => {
   await fetch('/api/calibration', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ art: {} })
+    body: JSON.stringify({ card: {} })
   }).catch(() => {});
-  ART = null;
-  await loadArt();
+  CARD = null;
+  await loadCal();
   syncCal(); drawOverlay();
 };
 
-loadArt().then(() => { $('flip').checked = FLIP; syncCal(); drawOverlay(); });
+loadCal().then(() => { $('flip').checked = FLIP; syncCal(); drawOverlay(); });
 
 fetch('/api/info').then(r => r.json()).then(j => {
   $('info').textContent = j.ok
-    ? 'DB ' + j.cards + ' 枚 / 変種 ' + j.variants + ' 通り / パッチ ' +
-      j.patch.join('×') + ' / numpy ' + (j.numpy ? 'あり' : 'なし')
+    ? 'DB ' + j.cards + ' 枚 / アート窓 ' + (j.shapes || []).join('・') +
+      ' / 窓パッチ ' + (j.shapePatch || []).join('×') +
+      ' / 旧方式の変種 ' + j.variants + ' 通り / numpy ' + (j.numpy ? 'あり' : 'なし')
     : j.error;
   if (!j.ok) showAlert(esc(j.error));
+  if (j.ok && !(j.shapes || []).length) {
+    showAlert('種別ごとのアート窓がまだありません。<br>' +
+      '<code>python build_card_db.py --shapes</code> を実行してください。');
+  }
 }).catch(() => {
   showAlert('認識サーバに届いていません。このページは <code>start.py</code> 経由で開いてください。<br>' +
     '現在の URL：<code>' + esc(location.href) + '</code><br>' +

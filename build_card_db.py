@@ -33,9 +33,10 @@ except ImportError:
 
 # サムネの大きさは認識側と一致していなければならない
 try:
-    from start import TG, TC, MANA_TW, MANA_TH
+    from start import TG, TC, MANA_TW, MANA_TH, SW, SH, FW, FH, RW, RH
 except ImportError:
     TG, TC, MANA_TW, MANA_TH = 64, 16, 28, 32
+    SW, SH, FW, FH, RW, RH = 40, 40, 48, 72, 256, 388
 
 DB_PATH = 'arena_features.sqlite3'
 CACHE_PATH = 'arena_stage1.cache'
@@ -95,6 +96,14 @@ def schema(con):
         k TEXT PRIMARY KEY, v TEXT)''')
     con.execute('''CREATE TABLE IF NOT EXISTS mana (
         cost INTEGER PRIMARY KEY, w INTEGER, h INTEGER, feat BLOB NOT NULL)''')
+    # 種別ごとのアート窓と可視マスク。カードレンダーから実測する
+    con.execute('''CREATE TABLE IF NOT EXISTS shapes (
+        ctype TEXT PRIMARY KEY,
+        samples INTEGER,
+        s REAL, ox REAL, oy REAL,
+        u0 REAL, v0 REAL, u1 REAL, v1 REAL,
+        mw INTEGER, mh INTEGER, mask BLOB NOT NULL,
+        fw INTEGER, fh INTEGER, frame BLOB NOT NULL, fweight BLOB NOT NULL)''')
     return con
 
 
@@ -221,6 +230,203 @@ def build_mana(con, cards, locale, workers):
     return n
 
 
+def raw_render(card_id, locale):
+    """カードレンダーを RGB で返す。透過部分は黒で埋める。"""
+    im = Image.open(io.BytesIO(get(RENDER_URL.format(loc=locale, id=card_id))))
+    im.load()
+    if im.mode == 'RGBA':
+        bg = Image.new('RGB', im.size, (0, 0, 0))
+        bg.paste(im, mask=im.split()[-1])
+        im = bg
+    else:
+        im = im.convert('RGB')
+    return im.resize((RW, RH), Image.LANCZOS)
+
+
+def raw_art(card_id):
+    im = Image.open(io.BytesIO(get(ART_URL['256x'].format(id=card_id))))
+    im.load()
+    return im.convert('RGB')
+
+
+def _ncc_map(np, a, t):
+    """valid 位置の正規化相互相関マップ。a は探索対象、t はテンプレート。"""
+    th, tw = t.shape
+    H, W = a.shape
+    if H < th or W < tw:
+        return None
+    t0 = t - t.mean()
+    tn = float(np.sqrt((t0 * t0).sum()))
+    if tn < 1e-6:
+        return None
+    fh, fw = H + th - 1, W + tw - 1
+    f = np.fft.rfft2(a, (fh, fw)) * np.fft.rfft2(t0[::-1, ::-1], (fh, fw))
+    corr = np.fft.irfft2(f, (fh, fw))[th - 1:H, tw - 1:W]
+    ii = np.zeros((H + 1, W + 1)); ii[1:, 1:] = np.cumsum(np.cumsum(a, 0), 1)
+    i2 = np.zeros((H + 1, W + 1)); i2[1:, 1:] = np.cumsum(np.cumsum(a * a, 0), 1)
+
+    def box(m):
+        return m[th:, tw:] - m[:-th, tw:] - m[th:, :-tw] + m[:-th, :-tw]
+
+    s1, s2 = box(ii), box(i2)
+    var = np.maximum(s2 - s1 * s1 / (th * tw), 0.0)
+    den = np.sqrt(var) * tn
+    return np.where(den > 1e-6, corr / np.maximum(den, 1e-6), -1.0)
+
+
+# 全種別で確実にアートの内側になる窓（レンダー 256x388 上の座標）
+FIT_TPL = (100, 80, 156, 140)
+
+
+def fit_art(np, render_gray, art_im):
+    """render(u,v) -> art(s*u+ox, s*v+oy) の (ncc, s, ox, oy) を推定する。"""
+    tpl = render_gray[FIT_TPL[1]:FIT_TPL[3], FIT_TPL[0]:FIT_TPL[2]]
+    best = None
+    for i in range(52):
+        s = 0.55 + i * 0.025
+        k = int(round(256 / s))
+        a = np.asarray(art_im.convert('L').resize((k, k), Image.LANCZOS),
+                       dtype=np.float64)
+        m = _ncc_map(np, a, tpl)
+        if m is None:
+            continue
+        j = int(np.argmax(m))
+        v = float(m.flat[j])
+        y, x = divmod(j, m.shape[1])
+        if best is None or v > best[0]:
+            best = (v, s, (x - FIT_TPL[0]) * s, (y - FIT_TPL[1]) * s)
+    return best
+
+
+def _grow(np, seed, allow):
+    """seed から allow の中だけを塗り広げる。連結成分を1つ取り出すのに使う。"""
+    cur = seed & allow
+    for _ in range(600):
+        nxt = cur.copy()
+        nxt[1:, :] |= cur[:-1, :]
+        nxt[:-1, :] |= cur[1:, :]
+        nxt[:, 1:] |= cur[:, :-1]
+        nxt[:, :-1] |= cur[:, 1:]
+        nxt &= allow
+        if int(nxt.sum()) == int(cur.sum()):
+            break
+        cur = nxt
+    return cur
+
+
+def _clean_mask(np, corr, thresh=0.72):
+    """相関マップから、中央の連結成分だけを穴埋めして取り出す。"""
+    raw = corr > thresh
+    seed = np.zeros(raw.shape, bool)
+    seed[RH // 4:RH // 2, RW // 3:2 * RW // 3] = True
+    blob = _grow(np, seed & raw, raw)
+    if not blob.any():
+        blob = raw
+    # 外側から補集合を塗り、届かなかった穴をアート扱いに戻す
+    border = np.zeros(raw.shape, bool)
+    border[0, :] = border[-1, :] = True
+    border[:, 0] = border[:, -1] = True
+    outside = _grow(np, border & ~blob, ~blob)
+    return blob | ~(blob | outside)
+
+
+def _resample(np, a, box, ow, oh):
+    """a の box=(x0,y0,x1,y1) を ow x oh へ最近傍で伸縮する。"""
+    x0, y0, x1, y1 = box
+    xi = np.clip(np.linspace(x0, x1 - 1, ow), 0, a.shape[1] - 1).astype(np.int32)
+    yi = np.clip(np.linspace(y0, y1 - 1, oh), 0, a.shape[0] - 1).astype(np.int32)
+    return a[yi][:, xi]
+
+
+def build_shapes(con, cards, locale, workers, per_type=48, types=None):
+    """種別ごとのアート窓・可視マスク・枠テンプレートをレンダーから実測する。
+
+    やり方。
+      1. レンダーと素アートを NCC で位置合わせし、render->art の相似変換を得る
+      2. 同じ種別のカードを重ね、画素ごとに「レンダーの値がアートの値と連動するか」
+         を相関で測る。枠・名前バンド・文字はカードが変わっても動かないので相関が
+         落ち、アートが見えている画素だけが残る
+      3. 残った連結成分の外接矩形をアート窓、中身を可視マスクとして保存する
+      4. レンダーの中央値はアートが消えて枠だけが残るので、種別判定の
+         テンプレートとして一緒に保存する
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        print('--shapes には numpy が必要です。  pip install numpy')
+        return 0
+
+    want = types or ['MINION', 'SPELL', 'WEAPON', 'LOCATION']
+    by_type = {}
+    for t in want:
+        ids = [c['id'] for c in cards if c['type'] == t]
+        # セットが偏ると枠の世代も偏るので、全体から等間隔で拾う
+        step = max(1, len(ids) // per_type)
+        by_type[t] = ids[::step][:per_type]
+
+    def one(cid):
+        try:
+            r = raw_render(cid, locale)
+            a = raw_art(cid)
+        except Exception:  # noqa: BLE001 - 1枚落ちても続ける
+            return cid, None
+        g = np.asarray(r.convert('L'), dtype=np.float64)
+        f = fit_art(np, g, a)
+        if not f or f[0] < 0.85:
+            return cid, None
+        return cid, (np.asarray(r, dtype=np.float32), a, f)
+
+    n_done = 0
+    for t in want:
+        ids = by_type[t]
+        if len(ids) < 8:
+            print('  %-9s 標本が足りません（%d枚）' % (t, len(ids)))
+            continue
+        print('  %-9s %d枚を取得中...' % (t, len(ids)))
+        got = []
+        with ThreadPoolExecutor(max(1, workers)) as ex:
+            for cid, v in ex.map(one, ids):
+                if v:
+                    got.append(v)
+        if len(got) < 8:
+            print('  %-9s 位置合わせできたのが %d枚だけでした' % (t, len(got)))
+            continue
+
+        fits = np.array([[v[2][1], v[2][2], v[2][3]] for v in got])
+        s, ox, oy = (float(x) for x in np.median(fits, axis=0))
+        # 全カードを同じ幾何で重ねる。個別の当てはめだと窓がにじむ
+        ui = np.clip(np.arange(RW) * s + ox, 0, 255).astype(np.int32)
+        vi = np.clip(np.arange(RH) * s + oy, 0, 255).astype(np.int32)
+        R = np.stack([v[0].mean(axis=2) for v in got])
+        A = np.stack([np.asarray(v[1].convert('L'), dtype=np.float32)[vi][:, ui]
+                      for v in got])
+        corr = ((R - R.mean(0)) * (A - A.mean(0))).mean(0)
+        corr /= (R.std(0) * A.std(0) + 1e-3)
+        corr = np.clip(corr, 0.0, 1.0)
+
+        vis = _clean_mask(np, corr)
+        ys, xs = np.nonzero(vis)
+        box = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+        mask = (_resample(np, corr * vis, box, SW, SH) * 255).astype(np.uint8)
+        frame = np.median(R, axis=0)
+        fbuf = _resample(np, frame, (0, 0, RW, RH), FW, FH).astype(np.uint8)
+        wbuf = (_resample(np, 1.0 - corr, (0, 0, RW, RH), FW, FH)
+                * 255).astype(np.uint8)
+
+        con.execute('INSERT OR REPLACE INTO shapes VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (t, len(got), s, ox, oy,
+                     box[0] / RW, box[1] / RH, box[2] / RW, box[3] / RH,
+                     SW, SH, mask.tobytes(),
+                     FW, FH, fbuf.tobytes(), wbuf.tobytes()))
+        n_done += 1
+        print('  %-9s n=%2d  s=%.4f ox=%.1f oy=%.1f  窓 x %.3f..%.3f y %.3f..%.3f '
+              ' 可視 %.1f%%'
+              % (t, len(got), s, ox, oy, box[0] / RW, box[2] / RW,
+                 box[1] / RH, box[3] / RH, 100.0 * mask.mean() / 255.0))
+    con.commit()
+    return n_done
+
+
 def update_meta(con, cards):
     """登録済みカードの付帯情報だけを更新する。アートは触らない。"""
     have = {r[0] for r in con.execute('SELECT id FROM cards')}
@@ -300,6 +506,10 @@ def main():
     ap.add_argument('--rebuild', action='store_true', help='DBを消して最初から作る')
     ap.add_argument('--mana-only', action='store_true',
                     help='マナコストのテンプレートだけを作り直す')
+    ap.add_argument('--shapes', action='store_true',
+                    help='種別ごとのアート窓・可視マスクをレンダーから実測する')
+    ap.add_argument('--shape-samples', type=int, default=48,
+                    help='--shapes で種別ごとに使うカード枚数（既定48）')
     ap.add_argument('--meta-only', action='store_true',
                     help='アートを再取得せず、名前・コスト・種族などだけ更新する')
     ap.add_argument('--tokens', action='store_true',
@@ -325,6 +535,13 @@ def main():
     if args.mana_only:
         build_mana(con, cards, args.locale, args.workers)
         con.close()
+        return 0
+
+    if args.shapes:
+        print('種別ごとのアート領域をカードレンダーから実測します。')
+        build_shapes(con, cards, args.locale, args.workers, args.shape_samples)
+        con.close()
+        print('次は  python3 start.py  を起動してください。')
         return 0
 
     if args.meta_only:
@@ -355,6 +572,8 @@ def main():
         print('すべて登録済みです。')
         if not con.execute('SELECT COUNT(*) FROM mana').fetchone()[0]:
             build_mana(con, cards, args.locale, args.workers)
+        if not con.execute('SELECT COUNT(*) FROM shapes').fetchone()[0]:
+            build_shapes(con, cards, args.locale, args.workers, args.shape_samples)
         _summary(con, total, 0, skipped, 0, 0.0, args)
         return 0
 
@@ -406,6 +625,8 @@ def main():
     print()
     if not con.execute('SELECT COUNT(*) FROM mana').fetchone()[0]:
         build_mana(con, cards, args.locale, args.workers)
+    if not con.execute('SELECT COUNT(*) FROM shapes').fetchone()[0]:
+        build_shapes(con, cards, args.locale, args.workers, args.shape_samples)
     _summary(con, total, ok, skipped, ng, time.time() - t0, args)
     return 0
 
@@ -426,6 +647,7 @@ def _summary(con, total, ok, skipped, ng, secs, args):
     have = con.execute('SELECT COUNT(*) FROM cards').fetchone()[0]
     fails = con.execute('SELECT COUNT(*) FROM failures').fetchone()[0]
     mana = con.execute('SELECT COUNT(*) FROM mana').fetchone()[0]
+    shapes = con.execute('SELECT COUNT(*) FROM shapes').fetchone()[0]
     size = os.path.getsize(args.db) if os.path.exists(args.db) else 0
     print('=' * 52)
     print('  総カード数   : %d' % total)
@@ -434,6 +656,7 @@ def _summary(con, total, ok, skipped, ng, secs, args):
     print('  今回失敗     : %d' % ng)
     print('  DB登録済み   : %d' % have)
     print('  マナテンプレート : %d 種' % mana)
+    print('  アート窓     : %d 種別' % shapes)
     print('  未解決の失敗 : %d' % fails)
     print('  処理時間     : %.1f 秒' % secs)
     print('  DBサイズ     : %.1f MB  (%s)' % (size / 1e6, os.path.abspath(args.db)))

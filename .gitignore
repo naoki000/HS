@@ -1,0 +1,8 @@
+# 生成物。消しても start.py / build_card_db.py が作り直す
+__pycache__/
+arena_stage1.cache
+arena_shape.cache
+arena_calibration.json
+arena_host.txt
+_bench_cache/
+*.log

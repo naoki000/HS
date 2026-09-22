@@ -44,6 +44,25 @@ button.danger{background:#2d1618;border-color:#a4232a;color:#ffb4b0;font-weight:
 .artPrev canvas{width:100%;height:auto;border-radius:7px;border:1px solid #30363d;
   background:#000;display:block}
 .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+/* 画像のすぐ下に出す簡易版。狭い画面でも3枚を横に並べたままにする */
+.quick{display:none;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.quick.on{display:grid}
+.quick .q{display:flex;flex-direction:column;gap:6px;min-width:0;
+  background:#151b23;border:1px solid #30363d;border-radius:10px;padding:8px}
+.quick .qh{display:flex;align-items:center;gap:6px;font-size:11px;color:#9da7b3}
+.quick .qh .dot{width:7px;height:7px;border-radius:50%;flex:none;background:#3fb950}
+.quick .qh .dot.uncertain{background:#d29922}
+.quick .qh .dot.nomatch{background:#f85149}
+.quick .qn{font-weight:700;font-size:14px;line-height:1.35;overflow-wrap:anywhere}
+.quick .qw{font-size:12px;color:#9da7b3;line-height:1.5;
+  font-variant-numeric:tabular-nums}
+.quick .qw div{display:flex;justify-content:space-between;gap:4px}
+.quick .qw b{color:#3fb950;font-weight:700}
+.quick .qw .low b{color:#f85149}
+.quick .qw .lab{color:#6e7781;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.quick button{margin-top:auto;padding:9px 4px;font-size:13px;
+  background:#1f6feb;border-color:#1f6feb}
+.quick button.done{background:#21262d;border-color:#30363d;color:#9da7b3}
 .card{background:#151b23;border:1px solid #30363d;border-radius:12px;padding:10px}
 .card h2{font-size:13px;margin:0 0 8px;color:#9da7b3}
 .card h2 .mana{display:inline-block;background:#1f6feb;color:#fff;border-radius:50%;
@@ -126,6 +145,12 @@ button.add{width:100%;margin-top:8px;padding:9px;font-size:13px;
   .cards{grid-template-columns:1fr}
   /* 1列のときだけ勝率順に並べ替える。3列表示では左右の位置を保つ */
   .card{order:var(--rank,0)}
+  /* 簡易版は3列のまま。狭い幅に収まるよう字だけ詰める */
+  .quick{gap:5px}
+  .quick .q{padding:6px 5px;gap:4px}
+  .quick .qn{font-size:12px}
+  .quick .qw{font-size:10px}
+  .quick button{padding:9px 2px;font-size:12px}
 }
 </style>
 </head>
@@ -159,9 +184,6 @@ button.add{width:100%;margin-top:8px;padding:9px;font-size:13px;
   <label class="flipRow"><input type="checkbox" id="arenaOnly" checked>アリーナ対象のみ</label>
 </div>
 
-<button id="go">HSReplay で3枚の勝率を見る</button>
-<div id="picked"></div>
-
 <div id="status" class="status">接続先を入力してください。</div>
 
 <div class="frame">
@@ -172,7 +194,7 @@ button.add{width:100%;margin-top:8px;padding:9px;font-size:13px;
   </div>
 </div>
 
-<div id="cards" class="cards"></div>
+<div id="quick" class="quick"></div>
 
 <section id="deckBox">
   <div id="deckHead">
@@ -190,6 +212,11 @@ button.add{width:100%;margin-top:8px;padding:9px;font-size:13px;
   <div id="deckFilter"></div>
   <ul id="deckList"></ul>
 </section>
+
+<div id="cards" class="cards"></div>
+
+<button id="go">HSReplay で3枚の勝率を見る</button>
+<div id="picked"></div>
 
 <div id="shade"><img alt=""></div>
 
@@ -664,8 +691,9 @@ function wrRow(label, a, strong) {
 
 function wrHTML(c) {
   const hero = LAST_HERO;
-  const rows = wrRow('全体', c.arenaAll, !hero) +
-    (hero ? wrRow(CLASS_JA[hero] || hero, c.arenaClass, true) : '');
+  // 使うのはヒーローの数字なので先に出す。全体はその裏付けとして下に置く
+  const rows = (hero ? wrRow(CLASS_JA[hero] || hero, c.arenaClass, true) : '') +
+    wrRow('全体', c.arenaAll, !hero);
   return '<div class="wr">' + (rows || 'アリーナの勝率データなし') + '</div>';
 }
 
@@ -674,7 +702,39 @@ function pickOf(c) {
            arenaAll: c.arenaAll, arenaClass: c.arenaClass };
 }
 
+/// 画像のすぐ下に出す簡易版。3択を見ながら選ぶ間はここだけ見れば済むよう、
+/// 名前と勝率と保存だけに絞る。候補や画像は下の詳細側にある。
+function qwRow(label, a) {
+  const low = a && a.win !== null && a.win !== undefined && a.win < 50;
+  return '<div' + (low ? ' class="low"' : '') + '>' +
+    '<span class="lab">' + esc(label) + '</span>' +
+    '<b>' + pct(a ? a.win : null) + '</b></div>';
+}
+
+function renderQuick() {
+  const q = $('quick');
+  q.classList.toggle('on', LAST.length > 0);
+  const hero = LAST_HERO;
+  q.innerHTML = LAST.map((r, i) => {
+    const sel = PICKED[i];
+    return '<div class="q">' +
+      '<div class="qh"><span class="dot ' + r.status + '"></span>' +
+      SLOTS[i].label + '</div>' +
+      '<div class="qn">' + esc(sel ? sel.name : '—') + '</div>' +
+      '<div class="qw">' +
+      (hero ? qwRow(CLASS_JA[hero] || hero, sel && sel.arenaClass) : '') +
+      qwRow('全体', sel && sel.arenaAll) + '</div>' +
+      (sel ? '<button class="qadd" data-slot="' + i + '">保存</button>'
+           : '<button disabled>保存</button>') +
+      '</div>';
+  }).join('');
+  q.querySelectorAll('button.qadd').forEach(b => {
+    b.onclick = () => addPick(+b.dataset.slot, b);
+  });
+}
+
 function renderCards() {
+  renderQuick();
   // デッキ勝率の降順。データが無いスロットは末尾へ送る
   const wr = i => {
     const a = PICKED[i] && PICKED[i].arena;
@@ -859,22 +919,27 @@ $('deckSort').onchange = () => {
   renderDeck();
 };
 
+async function addPick(slot, btn) {
+  const p = PICKED[slot];
+  if (!p) return;
+  const label = btn ? btn.textContent : '';
+  try {
+    const d = await deckCall({ action: 'add', cardId: p.cardId, hero: LAST_HERO });
+    renderDeck(d);
+    if (btn) {
+      btn.textContent = '保存しました';
+      btn.classList.add('done');
+      setTimeout(() => { btn.textContent = label; btn.classList.remove('done'); }, 1200);
+    }
+    $('status').textContent = d.added && d.added.length
+      ? p.name + ' と、付属の ' + d.added.join('、') + ' を保存しました。'
+      : p.name + ' を保存しました。';
+  } catch (e) { $('status').textContent = 'エラー: ' + e.message; }
+}
+
 function bindAdd() {
   $('cards').querySelectorAll('button.add').forEach(b => {
-    b.onclick = async () => {
-      const p = PICKED[+b.dataset.slot];
-      if (!p) return;
-      try {
-        const d = await deckCall(
-          { action: 'add', cardId: p.cardId, hero: LAST_HERO });
-        renderDeck(d);
-        b.textContent = '保存しました';
-        setTimeout(() => { b.textContent = 'デッキに保存'; }, 1200);
-        $('status').textContent = d.added && d.added.length
-          ? p.name + ' と、付属の ' + d.added.join('、') + ' を保存しました。'
-          : p.name + ' を保存しました。';
-      } catch (e) { $('status').textContent = 'エラー: ' + e.message; }
-    };
+    b.onclick = () => addPick(+b.dataset.slot, b);
   });
 }
 

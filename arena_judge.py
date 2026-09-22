@@ -86,31 +86,37 @@ def grab(host):
 
 
 def slot_query(im, rect):
-    """校正済みの矩形で切り出し、認識サーバと同じ形に落とす。"""
+    """校正済みのカード枠で切り出し、認識サーバと同じ形に落とす。
+
+    枠のまわりに余白を付けて渡す。サーバが枠テンプレートで位置を合わせ直す。
+    """
     w, h = im.size
-    box = (int(rect['x'] * w), int(rect['y'] * h),
-           int((rect['x'] + rect['w']) * w), int((rect['y'] + rect['h']) * h))
-    sub = im.crop(box)
-    g = sub.convert('L').resize((A.PW, A.PH), Image.LANCZOS).tobytes()
-    c = sub.resize((A.GW * 2, A.GH * 2), Image.LANCZOS).tobytes()
-    return A.query_descriptors(g, c)
+    m = A.CARD_MARGIN
+    x0 = (rect['x'] - m * rect['w']) * w
+    y0 = (rect['y'] - m * rect['h']) * h
+    x1 = x0 + rect['w'] * (1 + 2 * m) * w
+    y1 = y0 + rect['h'] * (1 + 2 * m) * h
+    sub = im.crop((int(x0), int(y0), int(x1), int(y1)))
+    g = sub.convert('L').resize((A.CARD_W, A.CARD_H), Image.LANCZOS).tobytes()
+    c = sub.resize((A.CARD_CW, A.CARD_CH), Image.LANCZOS).tobytes()
+    return g, c
 
 
-def slot_mana(im, rect):
-    """マナ結晶はアート枠からの相対位置で求める。"""
-    r = A.MANA_REL
+def slot_gem(im, rect):
+    """マナ結晶のまわりを原寸で切る。結晶そのものの切り出しはサーバがやる。"""
     w, h = im.size
-    x0 = (rect['x'] + r['x'] * rect['w']) * w
-    y0 = (rect['y'] + r['y'] * rect['h']) * h
-    x1 = x0 + r['w'] * rect['w'] * w
-    y1 = y0 + r['h'] * rect['h'] * h
+    p = A.GEM_PAD
+    x0 = (rect['x'] + p[0] * rect['w']) * w
+    y0 = (rect['y'] + p[1] * rect['h']) * h
+    x1 = (rect['x'] + p[2] * rect['w']) * w
+    y1 = (rect['y'] + p[3] * rect['h']) * h
     if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
         return b''
     gem = im.crop((int(x0), int(y0), int(x1), int(y1)))
-    return gem.convert('L').resize((A.MANA_TW, A.MANA_TH), Image.LANCZOS).tobytes()
+    return gem.convert('L').resize((A.GEM_W, A.GEM_H), Image.LANCZOS).tobytes()
 
 
-def judge(host, hero, art):
+def judge(host, hero, card):
     t0 = time.time()
     try:
         im = grab(host)
@@ -123,15 +129,19 @@ def judge(host, hero, art):
 
     picks = []
     for key, label in SLOTS:
-        rect = art[key]
-        cost, margin = A.classify_cost(slot_mana(im, rect))
-        r = A.recognize(slot_query(im, rect), hero, False, '', cost)
+        rect = card[key]
+        cg, cc = slot_query(im, rect)
+        q = A.shape_descriptors(cg, cc)
+        gem = slot_gem(im, rect)
+        cost = A.classify_cost(A.shape_gem(gem, q['rect']))[0] if gem else None
+        r = A.recognize(q, hero, False, '', cost, False, q['ctype'])
         cands = r.get('candidates') or []
         head = {'ok': '一致', 'uncertain': '判定不確実',
                 'nomatch': '特定できず', 'empty': '候補なし'}[r['status']]
         mana = ('マナ %d' % cost) if cost is not None else 'マナ不明'
         print()
-        print('%s  [%s]  %s  1位の差 %.3f' % (label, head, mana, r.get('gap', 0)))
+        print('%s  [%s]  %s  %s  1位の差 %.3f'
+              % (label, head, q['ctype'] or '種別不明', mana, r.get('gap', 0)))
         for c in cands[:3]:
             print('   %d. %-24s %.3f   ssim %.3f edge %.3f color %.3f'
                   % (c['rank'], c['name'], c['finalScore'],
@@ -170,9 +180,14 @@ def main():
     except A.DBMissing as e:
         print(e)
         return 1
-    print('カード %d 枚 / 変種 %d 通り  %.1fs'
-          % (len(idx['ids']), len(idx['variants']), time.time() - t0))
-    art = A.load_art()
+    print('カード %d 枚 / アート窓 %s  %.1fs'
+          % (len(idx['ids']), '・'.join(sorted(idx['shapes'])) or 'なし',
+             time.time() - t0))
+    if not idx['shapes']:
+        print('種別ごとのアート窓がありません。')
+        print('  python3 build_card_db.py --shapes を実行してください。')
+        return 1
+    card = A.load_card()
     print()
     print('Enter で判定 /  r クラス /  h 接続先 /  q 終了')
 
@@ -200,9 +215,8 @@ def main():
                 save_prefs(host, hero)
                 print('接続先: %s' % host)
             continue
-        art = A.load_art()
+        art = A.load_card()
         judge(host, hero, art)
-
 
 if __name__ == '__main__':
     sys.exit(main())

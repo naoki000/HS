@@ -37,14 +37,27 @@ PC の CPython には objc_util が無いので、import すると AVAILABLE が
     -[RPScreenRecorder stopRecordingWithHandler:]
 """
 
+import json
+import os
 import threading
 import time
 
 # 1 = コールバックのみ / 2 = PixelBuffer の寸法まで / 3 = JPEG まで
 PHASE = 1
 
-# 'capture' / 'capture_nohandler' / 'record'
+# 'capture' / 'capture_nohandler' / 'none' / 'record'
 START_MODE = 'capture'
+
+# 落ちるモードを避けながら自動で試す順番。
+#   capture            フレーム用 + 完了用
+#   capture_nohandler  完了用だけ
+#   none               ブロックを1つも渡さない。Python は一切呼ばれない
+#   record             旧 API。完了用だけ
+# すべて落ちたら開始そのものをやめる（無限にクラッシュさせない）。
+MODE_ORDER = ('capture', 'capture_nohandler', 'none', 'record')
+MODE_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'capture_modes.json')
+SURVIVE_SECONDS = 5.0     # 開始してこれだけ落ちなければ「通った」とみなす
 
 AVAILABLE = False
 IMPORT_ERROR = None
@@ -128,6 +141,86 @@ if AVAILABLE:
         IMPORT_ERROR = '%s: %s' % (type(e).__name__, e)
 
 
+# ------------------------------------------------- 開始モードの自動切り替え
+#
+# ブロックを渡すと落ちるので、落ちたモードを覚えて次のモードへ進む。
+# 開始する前に「試した」と記録しておき、次の起動でその記録が
+# 「落ちずに済んだ」で閉じていなければ、そのモードは落ちたということ。
+
+def _mode_load():
+    try:
+        with open(MODE_STATE_PATH, encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _mode_save(state):
+    try:
+        with open(MODE_STATE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError:
+        pass
+
+
+def reset_modes():
+    try:
+        os.remove(MODE_STATE_PATH)
+    except OSError:
+        pass
+
+
+def pick_mode(log=print):
+    """まだ落ちていないモードを選ぶ。全部落ちていたら None。"""
+    state = _mode_load()
+    for m in MODE_ORDER:
+        s = state.get(m)
+        if s and 'survived' not in s and not s.get('crashed'):
+            s['crashed'] = True
+            log('[capture] !! 前回 MODE %s で落ちました' % m)
+    _mode_save(state)
+
+    for m in MODE_ORDER:
+        s = state.get(m) or {}
+        if s.get('crashed'):
+            continue
+        return m
+    return None
+
+
+def mode_summary():
+    state = _mode_load()
+    out = []
+    for m in MODE_ORDER:
+        s = state.get(m) or {}
+        if s.get('survived'):
+            mark = '開始できた（落ちなかった）'
+        elif s.get('crashed'):
+            mark = 'クラッシュ'
+        else:
+            mark = '未試行'
+        out.append('  %-18s %s' % (m, mark))
+    return '\n'.join(out)
+
+
+def mode_verdict():
+    state = _mode_load()
+    if (state.get('none') or {}).get('survived'):
+        if (state.get('capture_nohandler') or {}).get('crashed'):
+            return ('ブロックを1つも渡さなければ開始できます。\n'
+                    '    つまり ReplayKit の開始自体は通り、\n'
+                    '    **Python のブロックを渡した瞬間だけ**落ちます。\n'
+                    '    フレームはブロックでしか受け取れないので、'
+                    'この経路は使えません。')
+        return 'ブロックなしなら開始できます。'
+    if all((state.get(m) or {}).get('crashed') for m in MODE_ORDER):
+        return ('どのモードでも落ちます。ReplayKit の呼び出し自体が\n'
+                '    この環境では成立しません。')
+    return '試行中です。もう一度 Run してください。'
+
+
 class ReplayKitCapture(object):
     """最新フレームを1枚だけ持ち続ける。保存はしない。
 
@@ -166,6 +259,7 @@ class ReplayKitCapture(object):
                        'has_start_recording': False,
                        'phase': self.phase, 'start_mode': self.start_mode}
         self._pending = None      # 'start' / 'stop' / None
+        self._survived = False
 
     # ------------------------------------------------------------- 状態
 
@@ -225,7 +319,23 @@ class ReplayKitCapture(object):
             self.start()
         elif todo == 'stop':
             self.stop()
+        self._note_survived()
         return todo
+
+    def _note_survived(self):
+        """開始してから一定時間落ちなければ、そのモードは通ったと記録する。"""
+        if self._survived or not self.start_requested or not self.started_at:
+            return
+        if time.time() - self.started_at < SURVIVE_SECONDS:
+            return
+        self._survived = True
+        state = _mode_load()
+        entry = state.setdefault(self.start_mode, {})
+        entry['survived'] = time.time()
+        entry.pop('crashed', None)
+        _mode_save(state)
+        self.log('[capture] MODE %s は %.0f 秒落ちませんでした'
+                 % (self.start_mode, SURVIVE_SECONDS))
 
     def status(self):
         with self._lock:
@@ -435,6 +545,12 @@ class ReplayKitCapture(object):
             rec.setMicrophoneEnabled_(False)
             self.log('[capture] microphone disabled')
 
+            # 開始する前に記録しておく。落ちてもここまでは残るので、
+            # 次の起動で「このモードは落ちた」と判定できる。
+            state = _mode_load()
+            state[self.start_mode] = {'tried': time.time()}
+            _mode_save(state)
+
             # RPSampleBufferType は NSInteger。arm64 では 8 バイト = c_long。
             # 引数は x0-x3 のレジスタ渡しなので、整数幅を取り違えても
             # ここで即座に落ちる類の間違いではない。実機の値をログに残す。
@@ -456,22 +572,30 @@ class ReplayKitCapture(object):
             return False
         self.log('[capture] selector check OK')
 
-        handler = None
-        if self.start_mode == 'capture':
-            handler = self._make_block(
-                self._on_sample, [c_void_p, c_void_p, c_long, c_void_p],
-                'handler')
+        handler = completion = None
+        if self.start_mode == 'none':
+            # Python のブロックを1つも渡さない。ObjC から Python は呼ばれない。
+            # フレームは来ないが、開始そのものが通るかだけを確かめられる。
+            self.log('[capture] ブロックを渡しません（Python は呼ばれません）')
         else:
-            self.log('[capture] handler は nil で呼びます（フレームは来ません）')
-
-        completion = self._make_block(
-            self._on_start_done, [c_void_p, c_void_p], 'completion')
+            if self.start_mode == 'capture':
+                handler = self._make_block(
+                    self._on_sample, [c_void_p, c_void_p, c_long, c_void_p],
+                    'handler')
+            else:
+                self.log('[capture] handler は nil で呼びます（フレームは来ません）')
+            completion = self._make_block(
+                self._on_start_done, [c_void_p, c_void_p], 'completion')
 
         self.start_requested = True
         self.started_at = time.time()
         self.log('[capture] calling startCapture...')
         rec.startCaptureWithHandler_completionHandler_(handler, completion)
         self.log('[capture] startCapture returned')
+        if self.start_mode == 'none':
+            # 完了ハンドラが無いので、成否は isRecording() で見るしかない
+            self.capturing = bool(rec.isRecording())
+            self.log('[capture] isRecording=%s' % self.capturing)
         return True
 
     def _start_record(self, rec):

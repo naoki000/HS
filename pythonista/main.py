@@ -31,19 +31,28 @@ from capture_server import CaptureServer                # noqa: E402
 import block_probe                                      # noqa: E402
 import crash_trap                                       # noqa: E402
 import replaykit_capture                                # noqa: E402
+import ui_app                                           # noqa: E402
 
 PORT = 8765
 JPEG_QUALITY = 0.7
 MIN_ENCODE_INTERVAL = 0.2     # 秒。これより短い間隔では変換しない（PHASE 2 以降）
 AUTO_START = True             # Run した時点でキャプチャを始める
 
+# Pythonista の ui で操作する。ブラウザを開かなくても iPad 単体で見られる。
+# ui のコールバックは本物のメインスレッドなので、ObjC を触るのも安全。
+# False にすると従来の Console ループになる。
+USE_UI = True
+# HTTP サーバは UI と併用する。Hearthstone を前面にしている間は
+# iPad の画面が見えないので、検証には別端末のブラウザが要る。
+RUN_HTTP_SERVER = True
+
 # ObjCBlock が動くかを ReplayKit より先に確かめる。
 # 落ちた段階は probe_state.json に残り、次の Run では飛ばして先へ進む。
 # やり直すときは RESET_BLOCK_PROBE = True にして1回 Run する。
 RUN_BLOCK_PROBE = True
 RESET_BLOCK_PROBE = False
-# ブロックの確認が通らなくても ReplayKit を試すか
-START_CAPTURE_ANYWAY = False
+# ReplayKit の開始モードの試行記録を消して最初から試す
+RESET_CAPTURE_MODES = False
 
 # 無音を鳴らし続けて suspend を遅らせる実験用スイッチ。
 # 既定は False。まず素の挙動を測り、そのあと True にして比べること。
@@ -58,6 +67,8 @@ LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 CRASH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           'crash_log.txt')
 _log_file = None
+# UI が末尾を読む。太らせないように切り詰める
+LOG_BUF = []
 
 
 def log(*a):
@@ -67,6 +78,8 @@ def log(*a):
         sys.stdout.flush()
     except Exception:      # noqa: BLE001
         pass
+    LOG_BUF.append(msg)
+    del LOG_BUF[:-200]
     if _log_file:
         try:
             _log_file.write('%s %s\n' % (time.strftime('%H:%M:%S'), msg))
@@ -180,56 +193,66 @@ def main():
     probe = BackgroundProbe(capture, log=log)
     probe.start()
 
-    server = CaptureServer(capture, probe, port=PORT, log=log)
-    urls = server.start()
-    log('')
-    log(' HTTP サーバ')
-    for u in urls:
-        log('   %s' % u)
-    log('   /frame.jpg  /frame  /status  /timeline  /start  /stop')
-    log('')
-    log(' ※ 認証はありません。信頼できるネットワークでだけ使ってください。')
+    server = None
+    urls = []
+    if RUN_HTTP_SERVER:
+        server = CaptureServer(capture, probe, port=PORT, log=log)
+        urls = server.start()
+        log('')
+        log(' HTTP サーバ')
+        for u in urls:
+            log('   %s' % u)
+        log('   /frame.jpg  /frame  /status  /timeline  /start  /stop')
+        log('')
+        log(' ※ 認証はありません。信頼できるネットワークでだけ使ってください。')
 
     keepalive = start_silent_audio() if KEEP_ALIVE_WITH_SILENT_AUDIO else None
 
-    blocks_ok = True
     if RUN_BLOCK_PROBE:
         log('')
         if RESET_BLOCK_PROBE:
             block_probe.reset()
             log('[probe] 記録を消しました')
-        blocks_ok, pstate = block_probe.run(log=log)
+        _, pstate = block_probe.run(log=log)
         log('')
         log(' ObjCBlock の確認')
         log(block_probe.summary(pstate))
         log('')
         log(' => %s' % block_probe.verdict(pstate))
         log('')
-        # 別スレッドから呼び返せないと分かっているなら、フレーム用ブロックは
-        # 渡さない。渡せば必ず落ちるので、押せてしまうボタンごと無効にする。
-        if (pstate.get('block_async') or {}).get('crashed'):
-            capture.start_mode = 'capture_nohandler'
-            log(' !! 別スレッドからのコールバックは落ちると分かっています。')
-            log('    フレーム用ブロックは渡しません（MODE capture_nohandler）。')
-            log('    開始と完了ハンドラだけが通るかを確認します。')
-            log('    フレームは来ないので frames は 0 のままが正常です。')
-            log('')
-            blocks_ok = True
 
-    if AUTO_START and (blocks_ok or START_CAPTURE_ANYWAY):
+    # 落ちたモードは二度と試さない。無限にクラッシュさせないための歯止め。
+    if RESET_CAPTURE_MODES:
+        replaykit_capture.reset_modes()
+        log(' 開始モードの記録を消しました')
+    mode = replaykit_capture.pick_mode(log=log)
+    log(' ReplayKit 開始モードの試行状況')
+    log(replaykit_capture.mode_summary())
+    log('')
+    log(' => %s' % replaykit_capture.mode_verdict())
+    log('')
+    if mode is None:
+        log(' 試せるモードが残っていません。ReplayKit は開始しません。')
+        log(' やり直すときは capture_modes.json を消してください。')
+    else:
+        capture.start_mode = mode
+        log(' 今回は MODE %s で試します。' % mode)
+
+    if AUTO_START and mode is not None:
         log('')
         log(' キャプチャを開始します…')
         capture.start()
 
     log('')
     log(' --- 実機での手順 ---')
-    log(' 1. 別の端末のブラウザで上の URL を開く')
-    log(' 2. frame_count が増えるのをそこで確認する')
+    log(' 1. iPad の画面で frames が増えるのを確認する')
+    log(' 2. バックグラウンド検証をするなら、別の端末のブラウザで上の URL を開く')
+    log('    （Hearthstone を前面にすると iPad の画面は見えないため）')
     log(' 3. iPad で Hearthstone に切り替える')
     log(' 4. 別端末のブラウザを見続ける')
     log('      frame_count が止まる      -> コールバックが止まった')
     log('      応答自体が返らなくなる    -> Pythonista ごと suspend された')
-    log(' 5. Pythonista に戻ってきて Console のまとめを読む')
+    log(' 5. Pythonista に戻ってきて画面を閉じるとまとめが出る')
     log('')
     log(' Pythonista ごと落ちたときは次の2つを見ること。')
     log('   capture_log.txt  どこまで進んだか（最終行）')
@@ -239,6 +262,11 @@ def main():
     last = 0
     last_report = 0.0
     try:
+        if USE_UI and ui_app.AVAILABLE:
+            log(' 画面を出します。閉じると終了します。')
+            ui_app.run(capture, probe, urls, LOG_BUF,
+                       background_probe.app_state)
+            raise KeyboardInterrupt
         while True:
             # ObjC はこのスレッドでしか触らない。他スレッドから触ると segfault する
             time.sleep(0.5)
@@ -269,7 +297,8 @@ def main():
         except Exception:      # noqa: BLE001
             traceback.print_exc()
         probe.stop()
-        server.stop()
+        if server:
+            server.stop()
         if keepalive:
             try:
                 keepalive.stop()

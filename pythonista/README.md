@@ -202,16 +202,38 @@ ReplayKit をどういじっても受け取れない。
 やり直すときは `main.py` の `RESET_BLOCK_PROBE = True` にして1回 Run する
 （または `probe_state.json` を消す）。
 
-#### 3. ReplayKit 固有（START_MODE で絞る）
+#### 3. ReplayKit 固有（開始モードを自動で試す）
 
 `block_probe` が全部 OK なら、原因は ReplayKit 側にある。
-`replaykit_capture.py` の `START_MODE` を変えて、どのブロックが原因かを分ける。
+開始モードは**自動で順に試す**。落ちたモードは二度と試さないので、
+無限にクラッシュし続けることはない。
 
-| START_MODE | 渡すブロック | 落ちなければ分かること |
+| モード | 渡すブロック | 落ちなければ分かること |
 |---|---|---|
-| `'capture'` | フレーム用 + 完了用 | 本命。これが通れば PHASE 2 へ |
-| `'capture_nohandler'` | 完了用だけ（フレーム用は nil） | 完了ブロックは無事。**フレーム用ブロックが原因** |
-| `'record'` | 完了用だけ（旧 API `startRecordingWithHandler:`） | 権限の同意も録画開始も通る。`startCapture` 固有の問題 |
+| `capture` | フレーム用 + 完了用 | 本命。これが通れば PHASE 2 へ |
+| `capture_nohandler` | 完了用だけ | 完了ブロックは無事。フレーム用が原因 |
+| `none` | **1つも渡さない** | ReplayKit の開始自体は通る。ブロックだけが原因 |
+| `record` | 完了用だけ（旧 API） | `startCapture` 固有の問題 |
+
+開始する前に `capture_modes.json` へ「試した」と書く。次の起動でそれが
+「落ちずに済んだ」で閉じていなければ、そのモードは落ちたと判定して次へ進む。
+起動時に一覧が出る。
+
+```
+ ReplayKit 開始モードの試行状況
+  capture            クラッシュ
+  capture_nohandler  クラッシュ
+  none               開始できた（落ちなかった）
+  record             未試行
+
+ => ブロックを1つも渡さなければ開始できます。
+    つまり ReplayKit の開始自体は通り、
+    **Python のブロックを渡した瞬間だけ**落ちます。
+    フレームはブロックでしか受け取れないので、この経路は使えません。
+```
+
+やり直すときは `main.py` の `RESET_CAPTURE_MODES = True` にして1回 Run する
+（または `capture_modes.json` を消す）。
 
 ### 権限の同意について
 
@@ -277,18 +299,53 @@ subprocess / 外部バイナリ。iOS API は `objc_util` から直接呼ぶ。
 | ファイル | 役割 |
 |---|---|
 | `main.py` | 入口。Run するのはこれだけ |
-| `replaykit_capture.py` | ReplayKit を objc_util から叩く。先頭に `PHASE` と `START_MODE` |
+| `ui_app.py` | Pythonista の ui で操作する画面 |
+| `replaykit_capture.py` | ReplayKit を objc_util から叩く。先頭に `PHASE` と `MODE_ORDER` |
 | `capture_server.py` | HTTP サーバ（別スレッド） |
 | `background_probe.py` | バックグラウンド移行後に何が止まるかを記録 |
 | `block_probe.py` | ObjCBlock が本当に動くかを ReplayKit と切り離して確かめる |
 | `crash_trap.py` | try/except で捕まらない種類のクラッシュを記録する |
-| `web/index.html` | ブラウザ確認用 |
+| `web/index.html` | ブラウザ確認用（別端末から見るとき） |
 | `capture_log.txt` | 実行時に作られる。どこまで進んだか（git 管理外） |
 | `crash_log.txt` | 実行時に作られる。落ちた瞬間のスタック（git 管理外） |
 | `probe_state.json` | ObjCBlock 確認の進捗（git 管理外） |
+| `capture_modes.json` | 開始モードの試行記録（git 管理外） |
 
 `objc_util` が無い環境（PC）でも import は通り、`available: false` を返して
 終わる。HTTP サーバ部分は PC でも動くので、API の形だけなら PC で確認できる。
+
+## 画面
+
+`main.py` を Run すると Pythonista の画面が出る。ブラウザは要らない。
+
+```
+MODE / PHASE   none / PHASE 1
+capturing      False
+frames         0
+app_state      active
+ReplayKit      available=True recording=False
+
+[ 開始 ] [ 停止 ] [ 記録を消す ]
+
+（最新フレーム）
+（ログの末尾）
+```
+
+**ui を使うのには安全上の理由もある。**
+ui のボタン操作や `ui.delay()` のコールバックは**本物のメインスレッド**で走るので、
+下の「いちばん重要な落とし穴」が構造的に起きなくなる。
+ObjC を触る処理（`pump()` / `refresh_availability()` / `app_state()`）は
+すべてこの更新ループから呼んでいる。
+
+HTTP サーバも並行して動く。**Hearthstone を前面にしている間は iPad の画面が
+見えない**ので、バックグラウンド検証には別端末のブラウザが必要。
+
+`main.py` の先頭で切り替えられる。
+
+```python
+USE_UI = True            # False にすると従来の Console ループ
+RUN_HTTP_SERVER = True   # False にすると HTTP サーバを立てない
+```
 
 ## いちばん重要な落とし穴: ObjC はスクリプトスレッドからしか触れない
 

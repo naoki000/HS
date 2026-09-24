@@ -92,11 +92,12 @@ PHASE 2 が通り、PHASE 3 で落ちるなら CoreImage / UIImage 経路。
 
 ### `startCapture returned` の直後で落ちる場合
 
-**ブロックの解放を最初に疑う。**
-
 `startCapture returned` が出ているなら、呼び出し自体は成功している。
-その次に起きるのは「ObjC 側がブロックを呼ぶ」ことなので、ブロックが
-すでに解放されていれば、そこで落ちる。Python の try/except では捕まらない。
+その次に起きるのは「ObjC 側がブロックを呼ぶ」ことなので、そこで落ちている。
+
+疑う順番は次のとおり。
+
+#### 1. ブロックの解放
 
 objc_util の `ObjCBlock` は、**Python の変数に入れておくだけでは足りない**。
 `retain_global()` を通す必要がある。
@@ -107,29 +108,54 @@ retain_global(blk)          # これが無いと ObjC から呼ばれる前に�
 ```
 
 このコードは `_make_block()` で必ず `retain_global()` を通し、さらに
-`self._blocks` にも残して二重に保持している。ログの
-`(retained)` はそれが通ったことを示す。
+`self._blocks` にも残して二重に保持している。ログの `(retained)` が目印。
 
-### 開始方法を切り替えて絞る（START_MODE）
+#### 2. ObjCBlock そのもの（ReplayKit と切り離して確かめる）
 
-それでも落ちる場合、`replaykit_capture.py` の `START_MODE` を変えて、
-どのブロックが原因かを分ける。
+`retain_global()` でも直らないなら、**ReplayKit ではなく ObjCBlock 自体**を
+疑う。`block_probe.py` が ReplayKit を使わずに4段階で確かめる。
+`main.py` が ReplayKit より先に自動で実行する。
+
+| 段階 | やること | 落ちたら分かること |
+|---|---|---|
+| `objc_basic` | `ObjCClass` を触るだけ。ブロックなし | objc_util が壊れている |
+| `block_create` | ブロックを作るだけ。呼ばない | 作る時点で無理 |
+| `block_sync` | **同じスレッド**から同期で呼ばせる<br>`NSArray enumerateObjectsUsingBlock:` | ObjCBlock 自体が使えない |
+| `block_async` | **別スレッド**から呼ばせる<br>`NSOperationQueue addOperationWithBlock:` | 別スレッドから Python を呼べない |
+
+**ReplayKit のフレームコールバックは `block_async` と同じ形**（別スレッドから
+Python を呼び返す）。つまり `block_sync` が通って `block_async` で落ちるなら、
+ReplayKit をどういじっても受け取れない。
+
+落ちても困らないよう、進捗は `probe_state.json` に**先に**書いてある。
+「開始したのに終了が記録されていない段階」＝そこで落ちた段階。
+次に Run するとその段階を飛ばして先へ進むので、
+**1回のクラッシュにつき1つ結果が確定する**。何度か Run すれば表が埋まる。
+
+```
+  objc_basic    OK
+  block_create  OK
+  block_sync    OK
+  block_async   CRASH（Pythonista ごと落ちた）
+
+ => 別スレッドから Python を呼び返すと落ちます。
+    ReplayKit のフレームコールバックも同じ形なので、
+    この方式では原理的に受け取れません。
+```
+
+やり直すときは `main.py` の `RESET_BLOCK_PROBE = True` にして1回 Run する
+（または `probe_state.json` を消す）。
+
+#### 3. ReplayKit 固有（START_MODE で絞る）
+
+`block_probe` が全部 OK なら、原因は ReplayKit 側にある。
+`replaykit_capture.py` の `START_MODE` を変えて、どのブロックが原因かを分ける。
 
 | START_MODE | 渡すブロック | 落ちなければ分かること |
 |---|---|---|
 | `'capture'` | フレーム用 + 完了用 | 本命。これが通れば PHASE 2 へ |
 | `'capture_nohandler'` | 完了用だけ（フレーム用は nil） | 完了ブロックは無事。**フレーム用ブロックが原因** |
 | `'record'` | 完了用だけ（旧 API `startRecordingWithHandler:`） | 権限の同意も録画開始も通る。`startCapture` 固有の問題 |
-
-切り分けの順番。
-
-1. `'capture'` で落ちる
-2. → `'capture_nohandler'` を試す
-   - 落ちない: フレーム用ブロックが原因。argtypes か呼び出し規約を疑う
-   - 落ちる: 完了ブロックか `startCapture` 自体が原因
-3. → `'record'` を試す
-   - 落ちない: `startCaptureWithHandler:` 固有の問題
-   - 落ちる: ObjCBlock の仕組みそのものか、権限まわり
 
 ### 権限の同意について
 
@@ -195,14 +221,77 @@ subprocess / 外部バイナリ。iOS API は `objc_util` から直接呼ぶ。
 | ファイル | 役割 |
 |---|---|
 | `main.py` | 入口。Run するのはこれだけ |
-| `replaykit_capture.py` | ReplayKit を objc_util から叩く。先頭に `PHASE` |
+| `replaykit_capture.py` | ReplayKit を objc_util から叩く。先頭に `PHASE` と `START_MODE` |
 | `capture_server.py` | HTTP サーバ（別スレッド） |
 | `background_probe.py` | バックグラウンド移行後に何が止まるかを記録 |
+| `block_probe.py` | ObjCBlock が本当に動くかを ReplayKit と切り離して確かめる |
+| `crash_trap.py` | try/except で捕まらない種類のクラッシュを記録する |
 | `web/index.html` | ブラウザ確認用 |
-| `capture_log.txt` | 実行時に作られる。クラッシュしても残る（git 管理外） |
+| `capture_log.txt` | 実行時に作られる。どこまで進んだか（git 管理外） |
+| `crash_log.txt` | 実行時に作られる。落ちた瞬間のスタック（git 管理外） |
+| `probe_state.json` | ObjCBlock 確認の進捗（git 管理外） |
 
 `objc_util` が無い環境（PC）でも import は通り、`available: false` を返して
 終わる。HTTP サーバ部分は PC でも動くので、API の形だけなら PC で確認できる。
+
+## エラーは例外で捕まえられるのか
+
+**種類によって違う。** try/except で捕まるのは1つ目だけ。
+
+| 種類 | 例 | `try/except` | このコードの対処 |
+|---|---|---|---|
+| Python 例外 | `AttributeError` | **捕まる** | 全ハンドラを try/except で包んである |
+| ObjC 例外 (`NSException`) | 無いセレクタの呼び出し | 捕まらない。誰も catch しないと `abort()` | `NSSetUncaughtExceptionHandler` で死ぬ直前に記録 |
+| メモリ違反 (`EXC_BAD_ACCESS`) | 解放済みブロックの呼び出し | そもそも例外ではない（`SIGSEGV` / `SIGBUS`） | `faulthandler` で死ぬ直前にスタックを記録 |
+
+下の2つは**止められない**。プロセスは必ず死ぬ。できるのは「死ぬ直前に
+書き出す」ことだけで、それを `crash_trap.py` がやっている。
+
+```
+[crash] faulthandler=True  NSException=True  -> .../crash_log.txt
+```
+
+次に起動したとき、前回の記録があれば Console の先頭に出す。
+
+```
+ !! 前回のクラッシュ記録（.../crash_log.txt）
+    --- faulthandler 有効 2026-09-25 04:43:35 ---
+    Fatal Python error: Segmentation fault
+    Current thread 0x... (most recent call first):
+      File ".../replaykit_capture.py", line NNN in _on_sample
+```
+
+`NSException` なら名前・理由・ネイティブスタックまで残る。
+
+```
+!!!! ObjC 例外で落ちます 2026-09-25 04:43:35
+  name   : NSInvalidArgumentException
+  reason : -[NSObject someSelector]: unrecognized selector sent to instance
+    0   CoreFoundation   0x...
+    1   libobjc.A.dylib  0x...
+```
+
+### それでも何も残らない場合
+
+`crash_log.txt` が空のまま落ちるなら、シグナルが Python まで届いていない。
+その場合は **iOS のクラッシュレポート**を見る。ここにはネイティブの
+バックトレースが完全な形で残る。
+
+```
+設定 > プライバシーとセキュリティ > 解析と改善 > 解析データ
+  -> Pythonista3-2026-09-25-......ips
+```
+
+`Exception Type` を見れば種類が分かる。
+
+| Exception Type | 意味 |
+|---|---|
+| `EXC_BAD_ACCESS (SIGSEGV)` | 不正なメモリ参照。解放済みブロックの呼び出しなど |
+| `EXC_CRASH (SIGABRT)` | ObjC 例外か `abort()` |
+| `EXC_BREAKPOINT (SIGTRAP)` | Swift/ObjC のアサーション |
+
+`Thread N Crashed` のスタックに `ReplayKit` や `libffi`、`_ctypes` が
+並んでいれば、ブロック呼び出しで落ちたと確定できる。
 
 ## 起動手順
 

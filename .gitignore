@@ -7,5 +7,7 @@ arena_host.txt
 _bench_cache/
 pythonista/_silence.wav
 pythonista/capture_log.txt
+pythonista/crash_log.txt
+pythonista/probe_state.json
 *.log
 arena_deck.json

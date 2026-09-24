@@ -27,12 +27,22 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from background_probe import BackgroundProbe            # noqa: E402
 from capture_server import CaptureServer                # noqa: E402
+import block_probe                                      # noqa: E402
+import crash_trap                                       # noqa: E402
 import replaykit_capture                                # noqa: E402
 
 PORT = 8765
 JPEG_QUALITY = 0.7
 MIN_ENCODE_INTERVAL = 0.2     # 秒。これより短い間隔では変換しない（PHASE 2 以降）
 AUTO_START = True             # Run した時点でキャプチャを始める
+
+# ObjCBlock が動くかを ReplayKit より先に確かめる。
+# 落ちた段階は probe_state.json に残り、次の Run では飛ばして先へ進む。
+# やり直すときは RESET_BLOCK_PROBE = True にして1回 Run する。
+RUN_BLOCK_PROBE = True
+RESET_BLOCK_PROBE = False
+# ブロックの確認が通らなくても ReplayKit を試すか
+START_CAPTURE_ANYWAY = False
 
 # 無音を鳴らし続けて suspend を遅らせる実験用スイッチ。
 # 既定は False。まず素の挙動を測り、そのあと True にして比べること。
@@ -43,6 +53,9 @@ KEEP_ALIVE_WITH_SILENT_AUDIO = False
 # 最後に出たログが残るよう、1行ごとに flush してファイルにも書く。
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         'capture_log.txt')
+# 落ちる瞬間のスタック。try/except で捕まらない種類はここに残る
+CRASH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'crash_log.txt')
 _log_file = None
 
 
@@ -130,6 +143,16 @@ def main():
     open_log()
     banner()
 
+    # 前回ネイティブクラッシュしていたら、その跡が残っている
+    prev = crash_trap.previous_crash(CRASH_PATH)
+    if prev:
+        log('')
+        log(' !! 前回のクラッシュ記録（%s）' % CRASH_PATH)
+        for line in prev.splitlines():
+            log('    %s' % line)
+        log('')
+    crash_trap.install(CRASH_PATH, log=log)
+
     capture = replaykit_capture.ReplayKitCapture(
         jpeg_quality=JPEG_QUALITY,
         min_encode_interval=MIN_ENCODE_INTERVAL,
@@ -165,7 +188,24 @@ def main():
 
     keepalive = start_silent_audio() if KEEP_ALIVE_WITH_SILENT_AUDIO else None
 
-    if AUTO_START:
+    blocks_ok = True
+    if RUN_BLOCK_PROBE:
+        log('')
+        if RESET_BLOCK_PROBE:
+            block_probe.reset()
+            log('[probe] 記録を消しました')
+        blocks_ok, pstate = block_probe.run(log=log)
+        log('')
+        log(' ObjCBlock の確認')
+        log(block_probe.summary(pstate))
+        log('')
+        log(' => %s' % block_probe.verdict(pstate))
+        log('')
+        if not blocks_ok and not START_CAPTURE_ANYWAY:
+            log(' ObjCBlock が通っていないので ReplayKit は開始しません。')
+            log(' もう一度 Run すると、落ちた段階を飛ばして続きを確認します。')
+
+    if AUTO_START and (blocks_ok or START_CAPTURE_ANYWAY):
         log('')
         log(' キャプチャを開始します…')
         capture.start()
@@ -180,7 +220,9 @@ def main():
     log('      応答自体が返らなくなる    -> Pythonista ごと suspend された')
     log(' 5. Pythonista に戻ってきて Console のまとめを読む')
     log('')
-    log(' Pythonista ごと落ちたときは capture_log.txt の最終行を見ること。')
+    log(' Pythonista ごと落ちたときは次の2つを見ること。')
+    log('   capture_log.txt  どこまで進んだか（最終行）')
+    log('   crash_log.txt    落ちた瞬間のスタック')
     log('')
 
     last = 0

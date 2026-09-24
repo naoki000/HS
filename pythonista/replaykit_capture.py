@@ -172,21 +172,56 @@ def reset_modes():
         pass
 
 
+def _mode_open(mode):
+    """開始する直前に「実行中」と書く。
+
+    この印は正しく停止できるまで消さない。途中で落ちると残るので、
+    次の起動で「このモードは落ちた」と判定できる。
+    5 秒だけ見て消してしまうと、録画が実際に始まってから落ちるケースを
+    見逃し、同じモードを永遠に選び続けてしまう。
+    """
+    state = _mode_load()
+    e = state.setdefault(mode, {})
+    e['open'] = time.time()
+    e['runs'] = e.get('runs', 0) + 1
+    _mode_save(state)
+
+
+def _mode_close(mode):
+    """正しく停止できたときに印を消す。"""
+    state = _mode_load()
+    e = state.get(mode)
+    if e and e.pop('open', None):
+        _mode_save(state)
+
+
 def pick_mode(log=print):
     """まだ落ちていないモードを選ぶ。全部落ちていたら None。"""
     state = _mode_load()
+    changed = False
     for m in MODE_ORDER:
-        s = state.get(m)
-        if s and 'survived' not in s and not s.get('crashed'):
-            s['crashed'] = True
+        e = state.get(m)
+        if not e or 'open' not in e:
+            continue
+        # 開始の記録が閉じていない = そのまま落ちた
+        e.pop('open', None)
+        e['crashed'] = True
+        e['crashes'] = e.get('crashes', 0) + 1
+        changed = True
+        if e.pop('survived', None):
+            # 5 秒の窓を抜けてから落ちている。
+            # 「開始は通るが、録画が本当に始まると落ちる」
+            e['late_crash'] = True
+            log('[capture] !! MODE %s は開始直後は無事でしたが、'
+                'そのあと落ちました' % m)
+        else:
             log('[capture] !! 前回 MODE %s で落ちました' % m)
-    _mode_save(state)
+    if changed:
+        _mode_save(state)
 
     for m in MODE_ORDER:
-        s = state.get(m) or {}
-        if s.get('crashed'):
-            continue
-        return m
+        if not (state.get(m) or {}).get('crashed'):
+            return m
     return None
 
 
@@ -195,10 +230,12 @@ def mode_summary():
     out = []
     for m in MODE_ORDER:
         s = state.get(m) or {}
-        if s.get('survived'):
-            mark = '開始できた（落ちなかった）'
+        if s.get('late_crash'):
+            mark = '開始は通ったが、そのあとクラッシュ'
         elif s.get('crashed'):
             mark = 'クラッシュ'
+        elif s.get('survived'):
+            mark = '開始できた（落ちなかった）'
         else:
             mark = '未試行'
         out.append('  %-18s %s' % (m, mark))
@@ -207,7 +244,13 @@ def mode_summary():
 
 def mode_verdict():
     state = _mode_load()
-    if (state.get('none') or {}).get('survived'):
+    none_s = state.get('none') or {}
+    if none_s.get('late_crash'):
+        return ('ブロックを渡さなくても落ちます。startCapture は戻ってきますが、\n'
+                '    録画が実際に始まった瞬間に落ちます。\n'
+                '    ReplayKit が nil のハンドラを呼ぶためで、\n'
+                '    ブロック無しで使う道はありません。')
+    if none_s.get('survived'):
         if (state.get('capture_nohandler') or {}).get('crashed'):
             return ('ブロックを1つも渡さなければ開始できます。\n'
                     '    つまり ReplayKit の開始自体は通り、\n'
@@ -216,8 +259,8 @@ def mode_verdict():
                     'この経路は使えません。')
         return 'ブロックなしなら開始できます。'
     if all((state.get(m) or {}).get('crashed') for m in MODE_ORDER):
-        return ('どのモードでも落ちます。ReplayKit の呼び出し自体が\n'
-                '    この環境では成立しません。')
+        return ('どのモードでも落ちます。Pythonista から ReplayKit の\n'
+                '    フレームを受け取ることはできません。これ以上試せることはありません。')
     return '試行中です。もう一度 Run してください。'
 
 
@@ -332,7 +375,6 @@ class ReplayKitCapture(object):
         state = _mode_load()
         entry = state.setdefault(self.start_mode, {})
         entry['survived'] = time.time()
-        entry.pop('crashed', None)
         _mode_save(state)
         self.log('[capture] MODE %s は %.0f 秒落ちませんでした'
                  % (self.start_mode, SURVIVE_SECONDS))
@@ -524,6 +566,9 @@ class ReplayKitCapture(object):
         if not AVAILABLE:
             self.note_error('objc_util を import できません: %s' % IMPORT_ERROR)
             return False
+        if self.start_requested:
+            self.log('[capture] すでに開始済みです。停止してからにしてください')
+            return True
         try:
             rec = RPScreenRecorder.sharedRecorder()
             if not rec:
@@ -547,9 +592,7 @@ class ReplayKitCapture(object):
 
             # 開始する前に記録しておく。落ちてもここまでは残るので、
             # 次の起動で「このモードは落ちた」と判定できる。
-            state = _mode_load()
-            state[self.start_mode] = {'tried': time.time()}
-            _mode_save(state)
+            _mode_open(self.start_mode)
 
             # RPSampleBufferType は NSInteger。arm64 では 8 バイト = c_long。
             # 引数は x0-x3 のレジスタ渡しなので、整数幅を取り違えても
@@ -618,10 +661,16 @@ class ReplayKitCapture(object):
         self.log('[capture] stop() entered')
         if not AVAILABLE:
             return False
+        if not self.start_requested:
+            self.log('[capture] 開始していないので何もしません')
+            return True
         try:
             rec = RPScreenRecorder.sharedRecorder()
-            block = self._make_block(
-                self._on_stop_done, [c_void_p, c_void_p], 'stop')
+            # 'none' は「Python を一切呼ばせない」が目的なので、停止もブロック無し
+            block = None
+            if self.start_mode != 'none':
+                block = self._make_block(
+                    self._on_stop_done, [c_void_p, c_void_p], 'stop')
             if self.start_mode == 'record':
                 self.log('[capture] calling stopRecording...')
                 rec.stopRecordingWithHandler_(block)
@@ -629,6 +678,8 @@ class ReplayKitCapture(object):
                 self.log('[capture] calling stopCapture...')
                 rec.stopCaptureWithHandler_(block)
             self.start_requested = False
+            self.capturing = False
+            _mode_close(self.start_mode)
             self.log('[capture] stop returned')
             return True
         except Exception as e:      # noqa: BLE001

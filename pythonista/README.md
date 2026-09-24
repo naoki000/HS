@@ -3,6 +3,53 @@
 iPad の Pythonista 3 だけで、ReplayKit の画面キャプチャがどこまで動くかを
 **実機で測る**ための検証コード。カード認識は入っていない。
 
+## 実機で出た結論（2026-09-25 / iPad / iOS 27.0 / Pythonista 3.10.4）
+
+> **Pythonista では ReplayKit のフレームを受け取れない。**
+> ReplayKit の問題ではなく、**objc_util が別スレッドから Python を
+> 呼び返せない**（segfault する）ため。
+
+`block_probe.py` が ReplayKit を一切使わずに再現した。
+
+```
+  objc_basic     OK       ObjC を触るだけ
+  block_create   OK       ObjCBlock を作る
+  block_sync     OK       同じスレッドから呼び返す
+  block_async    CRASH    別スレッドから呼び返す      <- ここで死ぬ
+  objc_in_thread OK       生スレッドから ObjC を触る（autoreleasepool 付き）
+```
+
+`block_async` は `NSOperationQueue addOperationWithBlock:` だけを使っている。
+それでも Pythonista ごと落ちる。
+**ReplayKit の `startCaptureWithHandler:` も同じ形**（ReplayKit のキューから
+Python のブロックを呼ぶ）なので、必ず同じ結果になる。
+
+`crash_log.txt` のダンプにも裏付けがある。`Current thread` の表記が無く、
+**クラッシュしたスレッドに Python のフレームが存在しない**。
+Python が管理していないネイティブスレッドから Python に入ろうとして落ちている。
+
+`objc_in_thread` が OK なのは方向が逆だから。
+**Python → ObjC は `autoreleasepool` を敷けば通る。ObjC → Python が通らない。**
+
+### この先どうするか
+
+仮にコールバックが受け取れたとしても、次の2つが残る。
+
+1. `startCaptureWithHandler:` は**アプリ自身の画面しか撮れない**。
+   Hearthstone を撮るには Broadcast Upload Extension が必要で、
+   これは Xcode で作ってアプリに同梱する App Extension。Python からは作れない
+2. バックグラウンドでは suspend される
+
+つまり **3重に塞がっている**。「Pythonista 単体で Hearthstone の画面を
+撮り続ける」という道は、実機で測った結果として閉じている。
+
+**このリポジトリの既存の方式（PC で `start.py` を動かし、iPad からは
+Cast to Browser で配信する）が現実的な解のまま。**
+
+以下はその検証に使ったコードと手順の記録。
+
+---
+
 ## 目的
 
 最終的にやりたいのはこれ。
@@ -66,7 +113,8 @@ PHASE 2 以降で初めて実行する（`_load_imaging()`）。import 時にや
 
 PHASE 1 が通り、PHASE 2 で落ちるなら CoreMedia の ctypes 定義。
 PHASE 2 が通り、PHASE 3 で落ちるなら CoreImage / UIImage 経路。
-
+**実機では PHASE 1 にも到達しなかった**（`block_async` で落ちるため）。
+PHASE 2 / 3 のコードは書いてあるが、一度も実行されていない。
 ### クラッシュ位置の特定
 
 `start()` は1手ごとにログを出す。
@@ -568,12 +616,14 @@ Pythonista が `audio` を宣言していれば無音再生で延命できる可
 | 項目 | 要否 | Pythonista で可能か |
 |---|---|---|
 | entitlement（in-app capture） | 不要 | 可 |
-| 画面収録の許可 | 必要 | 可（ユーザが許可すれば） |
+| 画面収録の許可 | 必要 | 可（`isAvailable` は True だった） |
+| **フレームのコールバック受信** | 必須 | **不可**（別スレッドから Python を呼べない） |
 | 他アプリの画面を撮る | Broadcast Upload Extension が必須 | **不可**（拡張を追加できない） |
-| バックグラウンド継続 | Background Mode が必要 | 要測定（手順3） |
+| バックグラウンド継続 | Background Mode が必要 | 未測定（手前で詰まった） |
 
-**予想される結論は「Pythonista 単体では Hearthstone の画面は撮れない」。**
-ただしそれは実機のログで確定させる。このコードはそのためにある。
+**実機の結果として「Pythonista 単体では Hearthstone の画面は撮れない」で確定。**
+しかも詰まったのは想定していた制限1ではなく、その手前の
+「ObjC からの Python コールバック」だった。
 
 ## 取得できない場合の原因の切り分け
 

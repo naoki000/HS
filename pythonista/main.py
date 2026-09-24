@@ -205,9 +205,16 @@ def main():
         log('')
         log(' => %s' % block_probe.verdict(pstate))
         log('')
-        if not blocks_ok and not START_CAPTURE_ANYWAY:
-            log(' ObjCBlock が通っていないので ReplayKit は開始しません。')
-            log(' もう一度 Run すると、落ちた段階を飛ばして続きを確認します。')
+        # 別スレッドから呼び返せないと分かっているなら、フレーム用ブロックは
+        # 渡さない。渡せば必ず落ちるので、押せてしまうボタンごと無効にする。
+        if (pstate.get('block_async') or {}).get('crashed'):
+            capture.start_mode = 'capture_nohandler'
+            log(' !! 別スレッドからのコールバックは落ちると分かっています。')
+            log('    フレーム用ブロックは渡しません（MODE capture_nohandler）。')
+            log('    開始と完了ハンドラだけが通るかを確認します。')
+            log('    フレームは来ないので frames は 0 のままが正常です。')
+            log('')
+            blocks_ok = True
 
     if AUTO_START and (blocks_ok or START_CAPTURE_ANYWAY):
         log('')

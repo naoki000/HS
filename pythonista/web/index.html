@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pythonista Capture PoC</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;padding:14px;background:#0d1117;color:#f0f3f6;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font-size:17px;margin:0 0 10px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+button{padding:9px 14px;font-size:14px;font-weight:700;border-radius:8px;
+  border:1px solid #30363d;background:#21262d;color:#f0f3f6;cursor:pointer}
+button.go{background:#238636;border-color:#238636}
+button.stop{background:#2d1618;border-color:#a4232a;color:#ffb4b0}
+label{font-size:13px;display:flex;align-items:center;gap:6px}
+table{border-collapse:collapse;font-size:13px;margin-bottom:10px}
+td{padding:3px 12px 3px 0;vertical-align:top}
+td.k{color:#9da7b3;white-space:nowrap}
+b.ok{color:#3fb950}
+b.ng{color:#f85149}
+img{max-width:100%;border-radius:8px;border:1px solid #30363d;background:#000;display:block}
+pre{background:#151b23;border:1px solid #30363d;border-radius:8px;padding:8px;
+  font-size:11px;line-height:1.5;overflow:auto;max-height:230px;margin:0 0 10px}
+.hint{font-size:12px;color:#9da7b3;line-height:1.6}
+</style>
+</head>
+<body>
+<h1>Pythonista Capture PoC</h1>
+
+<div class="row">
+  <button class="go" id="start">開始</button>
+  <button class="stop" id="stop">停止</button>
+  <button id="refresh">更新</button>
+  <label><input type="checkbox" id="auto" checked>1秒ごとに自動更新</label>
+</div>
+
+<table id="st"></table>
+
+<img id="shot" alt="まだフレームがありません">
+
+<p class="hint">この画面を <b>別の端末</b>（PC や他のスマホ）から開くこと。
+iPad 側で Hearthstone に切り替えたあと、ここで
+<code>frame_count</code> が増え続けるか、そもそも応答が返るかを見る。</p>
+
+<h1>バックグラウンド検証</h1>
+<pre id="events">-</pre>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const fmt = t => t ? new Date(t * 1000).toLocaleTimeString() : '—';
+
+function row(k, v) {
+  return '<tr><td class="k">' + esc(k) + '</td><td>' + v + '</td></tr>';
+}
+const yn = v => v ? '<b class="ok">true</b>' : '<b class="ng">false</b>';
+
+async function tick() {
+  try {
+    const s = await (await fetch('/status', { cache: 'no-store' })).json();
+    const a = s.availability || {};
+    $('st').innerHTML =
+      row('capturing', yn(s.capturing)) +
+      row('frame_count', s.frame_count) +
+      row('encoded / dropped', s.encoded_count + ' / ' + s.dropped_count) +
+      row('has_frame', yn(s.has_frame)) +
+      row('last_frame_time', fmt(s.last_frame_time) +
+          (s.frame_age !== undefined ? '（' + s.frame_age + ' 秒前）' : '')) +
+      row('frame_size', s.frame_size ? s.frame_size.join(' × ') : '—') +
+      row('app_state', esc(s.app_state || '—')) +
+      row('probe_tick', s.probe_tick) +
+      row('ReplayKit available', yn(a.available)) +
+      row('startCapture あり', yn(a.has_start_capture)) +
+      (s.errors && s.errors.length
+        ? row('errors', '<b class="ng">' +
+              esc(s.errors[s.errors.length - 1].msg) + '</b>') : '');
+    if (s.has_frame) $('shot').src = '/frame.jpg?t=' + Date.now();
+
+    const tl = await (await fetch('/timeline', { cache: 'no-store' })).json();
+    $('events').textContent = (tl.events || []).map(e =>
+      new Date(e.t * 1000).toLocaleTimeString() + '  ' + e.kind + '  ' +
+      Object.keys(e).filter(k => k !== 't' && k !== 'kind')
+        .map(k => k + '=' + e[k]).join(' ')).join('\n') || '（まだ何も起きていません）';
+  } catch (e) {
+    $('st').innerHTML = row('通信', '<b class="ng">応答なし: ' + esc(e.message) +
+      '</b>（Pythonista が suspend された可能性）');
+  }
+}
+
+$('start').onclick = () => fetch('/start').then(tick);
+$('stop').onclick = () => fetch('/stop').then(tick);
+$('refresh').onclick = tick;
+setInterval(() => { if ($('auto').checked) tick(); }, 1000);
+tick();
+</script>
+</body>
+</html>

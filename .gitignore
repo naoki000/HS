@@ -5,5 +5,6 @@ arena_shape.cache
 arena_calibration.json
 arena_host.txt
 _bench_cache/
+pythonista/_silence.wav
 *.log
 arena_deck.json

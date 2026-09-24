@@ -53,6 +53,13 @@ for _name in ('DB_PATH', 'CACHE_PATH', 'SHAPE_CACHE_PATH', 'CALIB_PATH',
 A.VERBOSE = False
 
 SOURCE_PATH = os.path.join(ROOT, 'arena_source.json')
+
+# ホストだけ渡されたときに試すパス。
+# 旧 arena_judge.py と start.py の /castframe は '/frame' 決め打ちだったが、
+# キャスト系アプリはアプリごとに違うので、順に叩いて探す。
+CANDIDATE_PATHS = ('/frame', '/snapshot.jpg', '/shot.jpg', '/screenshot.jpg',
+                   '/capture.jpg', '/image.jpg', '/live.jpg',
+                   '/video', '/stream', '/stream.mjpg', '/mjpeg', '/')
 HS_URL = 'https://hsreplay.net/ja/arena/cards/#text='
 HS_SUFFIX = '&view=advanced'
 SLOTS = (('left', '左'), ('middle', '中央'), ('right', '右'))
@@ -108,25 +115,73 @@ def _read_mjpeg(resp, boundary):
     raise ValueError('MJPEG のコマを取り出せませんでした')
 
 
-def grab(url):
-    """1コマ取る。ふつうの JPEG でも MJPEG でも受ける。"""
+def norm_url(s):
+    """'192.168.11.6' のような入力でも通るようにする。"""
+    s = (s or '').strip()
+    if not s:
+        return ''
+    if not s.startswith(('http://', 'https://')):
+        s = 'http://' + s
+    return s.rstrip('/')
+
+
+def _open(url, timeout=8):
     sep = '&' if '?' in url else '?'
     req = urllib.request.Request(
         '%s%st=%d' % (url, sep, int(time.time() * 1000)),
         headers={'User-Agent': 'ArenaAssistant'})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        ctype = r.headers.get('Content-Type', '')
-        if 'multipart/' in ctype:
-            boundary = ''
-            for part in ctype.split(';'):
-                part = part.strip()
-                if part.startswith('boundary='):
-                    boundary = part[9:].strip('"')
-            if not boundary:
-                raise ValueError('boundary がありません: %s' % ctype)
-            data = _read_mjpeg(r, boundary)
-        else:
-            data = r.read()
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _read_frame(resp):
+    """応答から画像1枚ぶんのバイト列を取り出す。"""
+    ctype = resp.headers.get('Content-Type', '')
+    if 'multipart/' in ctype:
+        boundary = ''
+        for part in ctype.split(';'):
+            part = part.strip()
+            if part.startswith('boundary='):
+                boundary = part[9:].strip('"')
+        if not boundary:
+            raise ValueError('boundary がありません: %s' % ctype)
+        return _read_mjpeg(resp, boundary)
+    if 'text/' in ctype or 'json' in ctype:
+        raise ValueError('画像ではありません (%s)' % ctype)
+    return resp.read()
+
+
+def probe_source(url):
+    """パスが省略されていたら、配信していそうなパスを順に試す。
+
+    どれが当たったかを返す。当たらなければ、試した結果をまとめて例外にする。
+    """
+    base = norm_url(url)
+    if not base:
+        raise ValueError('URL が空です')
+    rest = base.split('://', 1)[1]
+    if '/' in rest:                      # パスまで書いてあるならそのまま使う
+        return base
+
+    tried = []
+    for path in CANDIDATE_PATHS:
+        cand = base + path
+        try:
+            with _open(cand, timeout=4) as r:
+                data = _read_frame(r)
+            Image.open(io.BytesIO(data)).load()
+            return cand
+        except urllib.error.HTTPError as e:
+            tried.append('%s -> %d' % (path, e.code))
+        except Exception as e:           # noqa: BLE001
+            tried.append('%s -> %s' % (path, type(e).__name__))
+    raise ValueError('配信が見つかりません。試したパス:\n  '
+                     + '\n  '.join(tried))
+
+
+def grab(url):
+    """1コマ取る。ふつうの JPEG でも MJPEG でも受ける。"""
+    with _open(url) as r:
+        data = _read_frame(r)
     im = Image.open(io.BytesIO(data))
     im.load()
     im = im.convert('RGB')
@@ -279,8 +334,11 @@ class ArenaView(ui.View):
         self.results = []
         self.image = None
         self.busy = False
-        self._pending = None
+        self._queue = []
+        self._qlock = threading.Lock()
         self._ready = False
+        self._resolved = None
+        self._source_text = load_source()
 
         self.status = label('索引を読み込んでいます…', 13, DIM)
 
@@ -383,20 +441,26 @@ class ArenaView(ui.View):
 
     # ------------------------------------------------------------ 準備
 
+    def _post(self, kind, payload):
+        """別スレッドからの連絡。索引の読み込み完了と判定完了が重なるので
+        1枠だと取りこぼす。"""
+        with self._qlock:
+            self._queue.append((kind, payload))
+
     def _warmup(self):
         """索引の読み込みは重い。UI を止めないよう別スレッドでやる。"""
         try:
             idx = A.index()
         except Exception as e:      # noqa: BLE001
-            self._pending = ('error', '索引を読めません: %s' % e)
+            self._post('error', '索引を読めません: %s' % e)
             return
         if not idx['shapes']:
-            self._pending = ('error',
-                             'アート窓がありません。build_card_db.py --shapes')
+            self._post('error',
+                       'アート窓がありません。build_card_db.py --shapes')
             return
         A.arena_pool()
-        self._pending = ('ready', 'カード %d 枚 / 窓 %s'
-                         % (len(idx['ids']), '・'.join(sorted(idx['shapes']))))
+        self._post('ready', 'カード %d 枚 / 窓 %s'
+                   % (len(idx['ids']), '・'.join(sorted(idx['shapes']))))
 
     # ------------------------------------------------------------ 操作
 
@@ -463,9 +527,13 @@ class ArenaView(ui.View):
         if not url:
             self.status.text = '配信の URL を入れてください'
             return
+        if norm_url(url) != norm_url(self._source_text):
+            self._resolved = None          # 入力が変わったら探し直す
+        self._source_text = url
         save_source(url)
         self.busy = True
-        self.status.text = '取得して判定しています…'
+        self.status.text = ('取得して判定しています…' if self._resolved
+                            else '配信を探しています…')
         threading.Thread(target=self._judge_worker, args=(url,),
                          daemon=True).start()
 
@@ -473,23 +541,28 @@ class ArenaView(ui.View):
         """numpy と PIL だけ。ObjC には触らないので別スレッドで安全。"""
         t0 = time.time()
         try:
-            im = grab(url)
+            if not self._resolved:
+                self._resolved = probe_source(url)
+            im = grab(self._resolved)
             res = judge(im, self.hero, self.card)
         except Exception as e:      # noqa: BLE001
-            self._pending = ('error', '%s: %s' % (type(e).__name__, e))
+            self._resolved = None
+            self._post('error', '%s: %s' % (type(e).__name__, e))
             return
         buf = io.BytesIO()
         im.resize((im.size[0] // 2, im.size[1] // 2),
                   Image.BILINEAR).save(buf, 'JPEG', quality=70)
-        self._pending = ('done', (res, buf.getvalue(), time.time() - t0))
+        self._post('done', (res, buf.getvalue(), time.time() - t0,
+                            self._resolved))
 
     # ------------------------------------------------------------ 更新
 
     def update(self):
         if not self.on_screen:
             return
-        job, self._pending = self._pending, None
-        if job:
+        with self._qlock:
+            jobs, self._queue = self._queue, []
+        for job in jobs:
             self._handle(job)
         ui.delay(self.update, 0.2)
 
@@ -502,11 +575,13 @@ class ArenaView(ui.View):
             self.busy = False
             self.status.text = payload
         elif kind == 'done':
-            res, jpeg, dt = payload
+            res, jpeg, dt, resolved = payload
             self.busy = False
             self.results = res
             self.shot.image = ui.Image.from_data(jpeg)
-            self.status.text = '判定しました  %.1f秒' % dt
+            self.status.text = '%s  %.1f秒' % (resolved, dt)
+            save_source(resolved)
+            self.url_field.text = resolved
             self.render()
 
     def render(self):

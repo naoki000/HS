@@ -159,6 +159,14 @@ class ReplayKitCapture(object):
         self.errors = []
         self.started_at = None
 
+        # ObjC はスクリプトスレッドからしか触らない。他スレッドはこの写しを読む
+        self._avail = {'objc_util': AVAILABLE, 'import_error': IMPORT_ERROR,
+                       'recorder': False, 'available': False,
+                       'recording': False, 'has_start_capture': False,
+                       'has_start_recording': False,
+                       'phase': self.phase, 'start_mode': self.start_mode}
+        self._pending = None      # 'start' / 'stop' / None
+
     # ------------------------------------------------------------- 状態
 
     def note_error(self, msg):
@@ -167,13 +175,17 @@ class ReplayKitCapture(object):
             del self.errors[:-MAX_ERRORS]
         self.log('[capture] ERROR %s' % msg)
 
-    def availability(self):
-        """ReplayKit が使えるか。呼べない理由もあわせて返す。"""
-        info = {'objc_util': AVAILABLE, 'import_error': IMPORT_ERROR,
-                'recorder': False, 'available': False,
-                'has_start_capture': False, 'has_start_recording': False,
-                'phase': self.phase, 'start_mode': self.start_mode}
+    def refresh_availability(self):
+        """ReplayKit の状態を読み直す。**スクリプトスレッドから呼ぶこと。**
+
+        HTTP サーバのスレッドなど、Pythonista が作っていないスレッドから
+        ObjC を触ると segfault する（NSAutoreleasePool が無いため）。
+        """
+        info = dict(self._avail)
+        info['phase'] = self.phase
+        info['start_mode'] = self.start_mode
         if not AVAILABLE:
+            self._avail = info
             return info
         try:
             rec = RPScreenRecorder.sharedRecorder()
@@ -185,9 +197,35 @@ class ReplayKitCapture(object):
                     sel('startCaptureWithHandler:completionHandler:')))
                 info['has_start_recording'] = bool(rec.respondsToSelector_(
                     sel('startRecordingWithHandler:')))
+            info.pop('error', None)
         except Exception as e:    # noqa: BLE001
             info['error'] = '%s: %s' % (type(e).__name__, e)
+        self._avail = info
         return info
+
+    def availability(self):
+        """他スレッドから安全に読める写し。ObjC には触らない。"""
+        return dict(self._avail)
+
+    # ------------------------------------- 他スレッドからの依頼（ObjC を触らない）
+
+    def request_start(self):
+        with self._lock:
+            self._pending = 'start'
+
+    def request_stop(self):
+        with self._lock:
+            self._pending = 'stop'
+
+    def pump(self):
+        """依頼をここで実行する。**スクリプトスレッドから定期的に呼ぶこと。**"""
+        with self._lock:
+            todo, self._pending = self._pending, None
+        if todo == 'start':
+            self.start()
+        elif todo == 'stop':
+            self.stop()
+        return todo
 
     def status(self):
         with self._lock:
@@ -324,7 +362,9 @@ class ReplayKitCapture(object):
     def _on_start_done(self, _blk, err):
         try:
             if err:
-                msg = ObjCInstance(err).localizedDescription()
+                # ReplayKit のキューから呼ばれる。ObjC を触るならプールを敷く
+                with autoreleasepool():
+                    msg = str(ObjCInstance(err).localizedDescription())
                 self.capturing = False
                 self.note_error('startCapture failed: %s' % msg)
             else:
@@ -338,8 +378,9 @@ class ReplayKitCapture(object):
         try:
             self.capturing = False
             if err:
-                self.note_error('stopCapture: %s'
-                                % ObjCInstance(err).localizedDescription())
+                with autoreleasepool():
+                    msg = str(ObjCInstance(err).localizedDescription())
+                self.note_error('stopCapture: %s' % msg)
             else:
                 self.log('[capture] stopCapture OK')
         except Exception as e:      # noqa: BLE001
@@ -361,10 +402,12 @@ class ReplayKitCapture(object):
 
     @on_main_thread
     def start(self):
-        """キャプチャ開始。UIKit を触るのでメインスレッドで実行する。
+        """キャプチャ開始。
 
-        Pythonista ごと落ちたときに「どこまで進んだか」を Console と
-        capture_log.txt から読めるよう、1手ごとにログを出す。
+        **スクリプトスレッドからしか呼んではいけない。**
+        HTTP サーバなど Pythonista が作っていないスレッドから呼ぶと
+        on_main_thread の中で segfault する。他スレッドからは
+        request_start() を使い、pump() でここまで持ってくる。
         """
         self.log('[capture] start() entered  (PHASE %d / MODE %s)'
                  % (self.phase, self.start_mode))

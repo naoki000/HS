@@ -16,17 +16,14 @@
     tick        0.5秒ごとに増える。Python が動いていた証拠
     gap         前回 tick からの経過。2秒以上空いたら suspend とみなす
     app_state   UIApplication.applicationState  0=active 1=inactive 2=background
-    frames      その時点の frame_count
+
+このスレッドは ObjC を一切触らない。Pythonista が作っていないスレッドから
+触ると segfault するため。app_state はスクリプトスレッドが
+ set_state() で渡す。
 """
 
 import threading
 import time
-
-try:
-    from objc_util import ObjCClass
-    UIApplication = ObjCClass('UIApplication')
-except ImportError:
-    UIApplication = None
 
 STATE_NAME = {0: 'active', 1: 'inactive', 2: 'background'}
 
@@ -36,10 +33,12 @@ MAX_EVENTS = 400
 
 
 def app_state():
-    if UIApplication is None:
-        return None
+    """UIApplication の状態。**スクリプトスレッドからだけ呼ぶこと。**"""
     try:
-        return int(UIApplication.sharedApplication().applicationState())
+        from objc_util import ObjCClass, autoreleasepool
+        with autoreleasepool():
+            return int(ObjCClass('UIApplication').sharedApplication()
+                       .applicationState())
     except Exception:      # noqa: BLE001 - 取れなくても計測は続ける
         return None
 
@@ -57,6 +56,11 @@ class BackgroundProbe(threading.Thread):
         self._last_state = None
         self._bg_since = None
         self._bg_frames = None
+        self._state = None          # スクリプトスレッドが set_state() で入れる
+
+    def set_state(self, st):
+        """UIApplication の状態を外から渡す。自分では ObjC を触らない。"""
+        self._state = st
 
     def _add(self, kind, **kw):
         ev = {'t': time.time(), 'kind': kind}
@@ -74,7 +78,7 @@ class BackgroundProbe(threading.Thread):
             gap = now - prev
             prev = now
             self.tick += 1
-            st = app_state()
+            st = self._state
             frames = self.capture.frame_count
 
             with self._lock:

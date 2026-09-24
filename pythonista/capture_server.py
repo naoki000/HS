@@ -100,12 +100,16 @@ def make_handler(capture, probe, log):
                 if path == '/timeline':
                     return self._json(probe.snapshot() if probe else {})
                 if path == '/start':
-                    capture.start()
+                    # ObjC をこのスレッドで触ると segfault する。
+                    # 依頼だけ置いて、スクリプトスレッドの pump() にやらせる。
+                    capture.request_start()
                     return self._json({'ok': True, 'action': 'start',
+                                       'queued': True,
                                        'status': self._status()})
                 if path == '/stop':
-                    capture.stop()
+                    capture.request_stop()
                     return self._json({'ok': True, 'action': 'stop',
+                                       'queued': True,
                                        'status': self._status()})
                 return self._json({'ok': False, 'error': 'not found'}, 404)
             except Exception as e:      # noqa: BLE001 - サーバは落とさない

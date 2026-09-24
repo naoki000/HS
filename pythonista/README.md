@@ -92,10 +92,13 @@ PHASE 2 が通り、PHASE 3 で落ちるなら CoreImage / UIImage 経路。
 
 ### `startCapture returned` の直後で落ちる場合
 
-`startCapture returned` が出ているなら、呼び出し自体は成功している。
-その次に起きるのは「ObjC 側がブロックを呼ぶ」ことなので、そこで落ちている。
+**まず `crash_log.txt` で「どのスレッドが落ちたか」を見る。**
+上の「いちばん重要な落とし穴」のとおり、HTTP スレッドや監視スレッドから
+ObjC を触ったのが原因なら、ReplayKit は無関係。
+`capture_log.txt` の最終行が `startCapture returned` でも、
+そこで止まったとは限らない（別スレッドが落ちただけ）。
 
-疑う順番は次のとおり。
+ReplayKit のコールバックが本当に原因だと確認できたら、次の順で疑う。
 
 #### 1. ブロックの解放
 
@@ -234,7 +237,72 @@ subprocess / 外部バイナリ。iOS API は `objc_util` から直接呼ぶ。
 `objc_util` が無い環境（PC）でも import は通り、`available: false` を返して
 終わる。HTTP サーバ部分は PC でも動くので、API の形だけなら PC で確認できる。
 
-## エラーは例外で捕まえられるのか
+## いちばん重要な落とし穴: ObjC はスクリプトスレッドからしか触れない
+
+**Pythonista が作っていないスレッドから ObjC を呼ぶと、アプリごと segfault する。**
+
+`threading.Thread` で自分が立てたスレッド（HTTP サーバや監視スレッド）には
+NSAutoreleasePool が無い。そこから `objc_util` 経由で ObjC を呼ぶと、
+Python の try/except では捕まらないネイティブクラッシュになる。
+
+実際に踏んだ。`crash_log.txt` に出たのがこれ。
+
+```
+Fatal Python error: Segmentation fault
+
+Thread 0x000000016f7ef000 (most recent call first):
+  File ".../objc_util.py", line 898 in __call__
+  File ".../objc_util.py", line 1095 in new_func          <- on_main_thread の中
+  File ".../pythonista/capture_server.py", line 103 in do_GET
+  File ".../http/server.py", line 414 in handle_one_request
+```
+
+`capture_server.py:103` は `capture.start()`。つまり
+**HTTP のリクエストを処理するスレッドから ReplayKit を開始しようとして落ちていた。**
+`@on_main_thread` を付けていても駄目で、その dispatch 自体が落ちる。
+
+**ReplayKit は無関係だった。** `capture_log.txt` の最終行が
+`startCapture returned` だったのは、そこで止まったからではなく、
+別のスレッドが落ちてプロセスごと消えたから。
+
+### この PoC での約束ごと
+
+| スレッド | ObjC | やること |
+|---|---|---|
+| スクリプト（`main()` のループ） | **触ってよい** | `refresh_availability()` / `start()` / `stop()` / `app_state()` |
+| HTTP サーバ | **触らない** | 写しを読む。開始・停止は `request_start()` で依頼するだけ |
+| 監視（`BackgroundProbe`） | **触らない** | 渡された状態を記録するだけ（`set_state()`） |
+| ReplayKit のコールバック | 最小限 | 触るときは `autoreleasepool()` の中で |
+
+`/start` と `/stop` は**その場では実行されない**。依頼を積むだけで、
+スクリプトスレッドの `pump()` が 0.5 秒以内に拾って実行する。
+応答に `"queued": true` が入るのはそのため。
+
+```python
+# 他スレッドから
+capture.request_start()      # 積むだけ。ObjC は触らない
+
+# スクリプトスレッドのループで
+capture.pump()               # ここで初めて start() が走る
+```
+
+同じ理由で `capture.availability()` は写しを返すだけにしてある。
+実際に ObjC を読むのは `refresh_availability()` で、これはスクリプト
+スレッドから 5 秒おきに呼んでいる。
+
+### 症状の見分けかた
+
+`crash_log.txt` の `Thread 0x... (most recent call first)` を見て、
+**どのスレッドが落ちたか**を必ず確認する。
+
+| スタックの中身 | 意味 |
+|---|---|
+| `http/server.py` / `socketserver.py` がある | HTTP スレッドから ObjC を触った |
+| `background_probe.py` がある | 監視スレッドから ObjC を触った |
+| `replaykit_capture.py` の `_on_sample` がある | ReplayKit のコールバックで落ちた |
+| `objc_util.py` だけで上が `main.py` | スクリプトスレッド。ObjC 呼び出し自体の問題 |
+
+
 
 **種類によって違う。** try/except で捕まるのは1つ目だけ。
 
@@ -273,9 +341,26 @@ subprocess / 外部バイナリ。iOS API は `objc_util` から直接呼ぶ。
 
 ### それでも何も残らない場合
 
-`crash_log.txt` が空のまま落ちるなら、シグナルが Python まで届いていない。
-その場合は **iOS のクラッシュレポート**を見る。ここにはネイティブの
-バックトレースが完全な形で残る。
+`crash_log.txt` は実行ごとに区切って書いてあり、起動時に前回の結果を判定する。
+
+| 記録 | 意味 |
+|---|---|
+| `--- faulthandler 有効 ...` のあとにスタック | **クラッシュした**。内容がそのまま原因 |
+| `--- 正常終了 ...` がある | 落ちていない |
+| ヘッダだけで何も続かない | **記録が残らずに死んだ**。faulthandler が捕まえられない落ち方 |
+
+3つ目（ヘッダだけ）は、iOS による強制終了やメモリ不足が疑われる。
+起動時に直近8回ぶんの一覧が出るので、何回目から落ち始めたかが分かる。
+
+```
+ これまでの実行
+  2026-09-25 04:50:34  クラッシュ
+  2026-09-25 04:52:08  記録なしで終了
+  2026-09-25 04:52:31  正常終了
+```
+
+それでも分からないときは **iOS のクラッシュレポート**を見る。
+ここにはネイティブのバックトレースが完全な形で残る。
 
 ```
 設定 > プライバシーとセキュリティ > 解析と改善 > 解析データ

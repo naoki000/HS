@@ -26,6 +26,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from background_probe import BackgroundProbe            # noqa: E402
+import background_probe                                 # noqa: E402
 from capture_server import CaptureServer                # noqa: E402
 import block_probe                                      # noqa: E402
 import crash_trap                                       # noqa: E402
@@ -147,9 +148,12 @@ def main():
     prev = crash_trap.previous_crash(CRASH_PATH)
     if prev:
         log('')
-        log(' !! 前回のクラッシュ記録（%s）' % CRASH_PATH)
-        for line in prev.splitlines():
+        log(' !! %s' % prev.splitlines()[0])
+        for line in prev.splitlines()[1:]:
             log('    %s' % line)
+        log('')
+        log(' これまでの実行')
+        log(crash_trap.history(CRASH_PATH))
         log('')
     crash_trap.install(CRASH_PATH, log=log)
 
@@ -158,7 +162,7 @@ def main():
         min_encode_interval=MIN_ENCODE_INTERVAL,
         log=log)
 
-    avail = capture.availability()
+    avail = capture.refresh_availability()
     log('')
     log(' ReplayKit の状態')
     for k in ('objc_util', 'recorder', 'available', 'recording',
@@ -226,13 +230,23 @@ def main():
     log('')
 
     last = 0
+    last_report = 0.0
     try:
         while True:
-            time.sleep(5)
+            # ObjC はこのスレッドでしか触らない。他スレッドから触ると segfault する
+            time.sleep(0.5)
+            probe.set_state(background_probe.app_state())
+            capture.pump()
+
+            now = time.time()
+            if now - last_report < 5.0:
+                continue
+            last_report = now
+            capture.refresh_availability()
             st = capture.status()
             gained = st['frame_count'] - last
             last = st['frame_count']
-            age = ('%.1fs前' % (time.time() - st['last_frame_time'])
+            age = ('%.1fs前' % (now - st['last_frame_time'])
                    if st['last_frame_time'] else '—')
             log('[%s] capturing=%-5s frames=%-7d (+%d/5s) last=%s size=%s'
                 % (time.strftime('%H:%M:%S'), st['capturing'], st['frame_count'],
@@ -276,6 +290,7 @@ def main():
                 _log_file.close()
             except Exception:      # noqa: BLE001
                 pass
+        crash_trap.mark_clean_exit()
     return 0
 
 

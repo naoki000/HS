@@ -24,6 +24,99 @@ Hearthstone の画面 → 自動でフレーム取得 → カード画像認識 
 | Python ごと止まる | アプリが suspend された | Pythonista では不可能。別の器が要る |
 | 止まらない | 継続できている | そのまま認識へ進める |
 
+## 段階的な切り分け（PHASE）
+
+Pythonista **アプリごと落ちる**という症状が出ている。Python の例外なら
+try/except で捕まるが、`objc_util` / `ctypes` のシグネチャやポインタ扱いを
+間違えるとネイティブクラッシュになり、try/except では捕まえられない。
+
+そこで、やることを3段階に分けた。`replaykit_capture.py` の先頭にある
+`PHASE` を書き換えて進める。**既定は 1。**
+
+```python
+PHASE = 1      # replaykit_capture.py の先頭
+```
+
+| PHASE | コールバックの中でやること | 切り分けられること |
+|---|---|---|
+| **1** | 数えるだけ。`sbuf` に一切触らない | ReplayKit + ObjCBlock のコールバック自体が安定しているか |
+| 2 | `CVPixelBuffer` を取り出して幅と高さだけ読む | CoreMedia / CoreVideo の ctypes シグネチャが正しいか |
+| 3 | JPEG まで変換する | CoreImage / UIImage 経路が正しいか |
+
+PHASE 1 では次を**一切呼ばない**。
+
+- `_to_jpeg()` / `_pixel_size()`
+- `CMSampleBufferGetImageBuffer` / `CMSampleBufferIsValid`
+- `CVPixelBufferGetWidth` / `CVPixelBufferGetHeight`
+- `CIImage.imageWithCVPixelBuffer_`
+- `CIContext.createCGImage_fromRect_`
+- `UIImageJPEGRepresentation`
+
+CoreMedia / CoreVideo / CoreImage の読み込みと ctypes の型定義も、
+PHASE 2 以降で初めて実行する（`_load_imaging()`）。import 時にやると
+**ログが1行も出ないうちに落ちて**、位置が分からなくなるため。
+
+### 判定のしかた
+
+| PHASE 1 の結果 | 読み取れること |
+|---|---|
+| `frame_count` が増える | コールバックは安定。PHASE 2 へ進む |
+| 開始ログは出るが `frame_count` が 0 のまま | コールバックが来ていない。ブロックの型か保持を疑う |
+| **PHASE 1 でもアプリごと落ちる** | JPEG 変換は無関係。`ObjCBlock` か `startCaptureWithHandler:completionHandler:` 周辺が原因 |
+
+PHASE 1 が通り、PHASE 2 で落ちるなら CoreMedia の ctypes 定義。
+PHASE 2 が通り、PHASE 3 で落ちるなら CoreImage / UIImage 経路。
+
+### クラッシュ位置の特定
+
+`start()` は1手ごとにログを出す。
+
+```
+[capture] start() entered  (PHASE 1)
+[capture] sharedRecorder OK
+[capture] isAvailable OK
+[capture] selector check OK
+[capture] microphone disabled
+[capture] sizeof(c_long)=8  (NSInteger は 8 のはず)
+[capture] handler block created
+[capture] completion block created
+[capture] calling startCapture...
+[capture] startCapture returned
+[capture] startCapture OK          <- 完了ハンドラ
+[capture] frames=30                <- コールバックが来ている
+```
+
+**アプリごと落ちると Console は消える。** そのため同じログを
+`pythonista/capture_log.txt` に1行ずつ flush して書いている。
+落ちたあとはこのファイルの最終行を見れば、どこまで進んだか分かる。
+
+### ObjCBlock の型について
+
+ReplayKit のハンドラは次の形。
+
+```objc
+void (^)(CMSampleBufferRef sampleBuffer,
+         RPSampleBufferType sampleBufferType,
+         NSError *error)
+```
+
+`objc_util` の `ObjCBlock` は第1引数にブロック自身を取るので、
+
+```python
+ObjCBlock(self._on_sample, restype=None,
+          argtypes=[c_void_p, c_void_p, c_long, c_void_p])
+#                   ^block   ^sbuf     ^type   ^NSError*
+```
+
+arm64 (LP64) では `RPSampleBufferType` = `NSInteger` = `long` = 8 バイトなので
+`c_long` で正しい。実機の `sizeof(c_long)` を起動ログに出しているので、
+8 以外ならそこで分かる。
+
+なお **arm64 の呼び出し規約では引数4個はすべて x0–x3 のレジスタ渡し**になる。
+整数幅を取り違えても上位ビットにゴミが入るだけで、それ自体が即クラッシュに
+なる類の間違いではない。したがって PHASE 1 で落ちる場合、argtypes よりも
+ブロックの生存期間やコールバックのスレッド周りを先に疑うべき。
+
 ## 実行環境
 
 | | |
@@ -41,10 +134,11 @@ subprocess / 外部バイナリ。iOS API は `objc_util` から直接呼ぶ。
 | ファイル | 役割 |
 |---|---|
 | `main.py` | 入口。Run するのはこれだけ |
-| `replaykit_capture.py` | ReplayKit を objc_util から叩く。最新1フレームを保持 |
+| `replaykit_capture.py` | ReplayKit を objc_util から叩く。先頭に `PHASE` |
 | `capture_server.py` | HTTP サーバ（別スレッド） |
 | `background_probe.py` | バックグラウンド移行後に何が止まるかを記録 |
 | `web/index.html` | ブラウザ確認用 |
+| `capture_log.txt` | 実行時に作られる。クラッシュしても残る（git 管理外） |
 
 `objc_util` が無い環境（PC）でも import は通り、`available: false` を返して
 終わる。HTTP サーバ部分は PC でも動くので、API の形だけなら PC で確認できる。
@@ -85,33 +179,33 @@ http://<iPadのIP>:8765/
 | パス | 返すもの |
 |---|---|
 | `GET /` | 確認用 HTML |
-| `GET /frame.jpg` | 最新 JPEG。無ければ 503 |
+| `GET /frame.jpg` | 最新 JPEG。**PHASE 1 では常に 503**（変換しないので当然） |
 | `GET /frame` | `/frame.jpg` と同じ（既存コードとの互換用。後述） |
 | `GET /status` | JSON |
 | `GET /timeline` | バックグラウンド検証の記録（JSON） |
 | `GET /start` | キャプチャ開始 |
 | `GET /stop` | キャプチャ停止 |
 
-`/status` の例。
+`/status` の例（PHASE 1）。
 
 ```json
 {
+  "phase": 1,
   "capturing": true,
   "frame_count": 123,
-  "encoded_count": 24,
-  "dropped_count": 99,
-  "has_frame": true,
   "last_frame_time": 1234567890.12,
-  "frame_size": [1620, 2160],
-  "app_state": "active",
+  "has_frame": false,
   "errors": []
 }
 ```
 
-`frame_count` はコールバックが呼ばれた回数そのもの。`encoded_count` は JPEG に
-変換した回数で、既定では 0.2 秒に1回までに絞っている（60fps ぶんを毎回
-変換すると Python が追いつかないため）。**コールバックが生きているかの判定には
-`frame_count` を見る。**
+PHASE 1 で見るのは `capturing` / `frame_count` / `last_frame_time` の3つだけ。
+`has_frame` が false、`/frame.jpg` が 503 なのは仕様どおり。
+
+`frame_count` はコールバックが呼ばれた回数そのもの。PHASE 2 以降で使う
+`encoded_count` は変換した回数で、0.2 秒に1回までに絞っている（60fps ぶんを
+毎回変換すると Python が追いつかないため）。**コールバックが生きているかの
+判定には常に `frame_count` を見る。**
 
 **認証は無い。信頼できるネットワークでだけ使うこと。**
 
@@ -250,10 +344,15 @@ Pythonista が `audio` を宣言していれば無音再生で延命できる可
 | `has_start_capture: false` | iOS 11 未満 |
 | `startCapture failed: ...` | ユーザが許可しなかった／他の録画と競合 |
 | 開始は成功するが `frame_count` が 0 のまま | コールバックが来ていない。ブロックの型か保持漏れを疑う |
+| **PHASE 1 でアプリごと落ちる** | JPEG 変換は無関係。`ObjCBlock` か `startCaptureWithHandler:` 周辺 |
+| PHASE 2 で落ちる | CoreMedia / CoreVideo の ctypes シグネチャ |
+| PHASE 3 で落ちる | CoreImage / UIImage 経路 |
 | フレームは来るが Pythonista の画面が映る | 制限1。仕様どおりで、Hearthstone は撮れない |
 | 切り替えた瞬間に `frame_count` が止まる | 制限3 |
 | `/status` も返らなくなる | 制限2。Pythonista ごと suspend |
-| `frame handler: ...` が errors に出る | 変換の失敗。サーバは生きているので継続する |
+| `frame handler: ...` が errors に出る | Python 例外。サーバは生きているので継続する |
+
+落ちた位置は `capture_log.txt` の最終行で判断する。
 
 ## 既存のカード認識へ繋ぐとき
 
@@ -289,3 +388,4 @@ jpeg = capture.latest_jpeg()          # bytes
 - フレームの連番保存
 - 向きの補正（CIImage の向きはそのまま。必要なら後段で回す）
 - 音声の取り込み
+- **PHASE 2 / 3 の実機検証**。コードはあるが PHASE 1 が通ってから試すこと

@@ -31,7 +31,7 @@ import replaykit_capture                                # noqa: E402
 
 PORT = 8765
 JPEG_QUALITY = 0.7
-MIN_ENCODE_INTERVAL = 0.2     # 秒。これより短い間隔では JPEG 化しない
+MIN_ENCODE_INTERVAL = 0.2     # 秒。これより短い間隔では変換しない（PHASE 2 以降）
 AUTO_START = True             # Run した時点でキャプチャを始める
 
 # 無音を鳴らし続けて suspend を遅らせる実験用スイッチ。
@@ -39,22 +39,57 @@ AUTO_START = True             # Run した時点でキャプチャを始める
 # True のまま測ると「suspend されるかどうか」が分からなくなる。
 KEEP_ALIVE_WITH_SILENT_AUDIO = False
 
+# Pythonista ごとネイティブクラッシュすると Console は消える。
+# 最後に出たログが残るよう、1行ごとに flush してファイルにも書く。
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        'capture_log.txt')
+_log_file = None
+
 
 def log(*a):
-    print(*a)
+    msg = ' '.join(str(x) for x in a)
+    print(msg)
+    try:
+        sys.stdout.flush()
+    except Exception:      # noqa: BLE001
+        pass
+    if _log_file:
+        try:
+            _log_file.write('%s %s\n' % (time.strftime('%H:%M:%S'), msg))
+            _log_file.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def open_log():
+    global _log_file
+    try:
+        _log_file = open(LOG_PATH, 'a', encoding='utf-8')
+        _log_file.write('\n===== %s 起動 =====\n'
+                        % time.strftime('%Y-%m-%d %H:%M:%S'))
+        _log_file.flush()
+    except Exception as e:      # noqa: BLE001
+        print('ログファイルを開けません: %s' % e)
 
 
 def banner():
     log('=' * 58)
-    log(' Pythonista 画面キャプチャ PoC')
+    log(' Pythonista 画面キャプチャ PoC   PHASE %d'
+        % replaykit_capture.PHASE)
     log('=' * 58)
     log(' Python   : %s' % sys.version.split()[0])
+    log(' ログ     : %s' % LOG_PATH)
     try:
         from objc_util import ObjCClass
         dev = ObjCClass('UIDevice').currentDevice()
         log(' 端末     : %s / iOS %s' % (dev.model(), dev.systemVersion()))
     except Exception as e:      # noqa: BLE001
         log(' 端末     : 取得できません（%s）' % e)
+    if replaykit_capture.PHASE == 1:
+        log('')
+        log(' PHASE 1: コールバックが来るかだけを見ます。')
+        log('          フレームの中身には触りません。JPEG 変換もしません。')
+        log('          /frame.jpg は 503 で正常です。')
 
 
 def start_silent_audio():
@@ -92,6 +127,7 @@ def start_silent_audio():
 
 
 def main():
+    open_log()
     banner()
 
     capture = replaykit_capture.ReplayKitCapture(
@@ -143,6 +179,8 @@ def main():
     log('      応答自体が返らなくなる    -> Pythonista ごと suspend された')
     log(' 5. Pythonista に戻ってきて Console のまとめを読む')
     log('')
+    log(' Pythonista ごと落ちたときは capture_log.txt の最終行を見ること。')
+    log('')
 
     last = 0
     try:
@@ -177,10 +215,24 @@ def main():
         log(probe.report())
         st = capture.status()
         log('')
-        log(' 最終  frames=%d  encoded=%d  has_frame=%s'
-            % (st['frame_count'], st['encoded_count'], st['has_frame']))
+        log(' 最終  PHASE=%d  frames=%d  encoded=%d  has_frame=%s'
+            % (st['phase'], st['frame_count'], st['encoded_count'],
+               st['has_frame']))
         for e in st['errors']:
             log('   error %s' % e['msg'])
+        if st['phase'] == 1:
+            log('')
+            if st['frame_count'] > 0:
+                log(' => PHASE 1 は通りました。コールバックは安定しています。')
+                log('    replaykit_capture.py の PHASE を 2 にして次を試してください。')
+            else:
+                log(' => コールバックが1回も来ていません。')
+                log('    start のログがどこで止まったかを確認してください。')
+        if _log_file:
+            try:
+                _log_file.close()
+            except Exception:      # noqa: BLE001
+                pass
     return 0
 
 

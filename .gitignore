@@ -6,5 +6,6 @@ arena_calibration.json
 arena_host.txt
 _bench_cache/
 pythonista/_silence.wav
+pythonista/capture_log.txt
 *.log
 arena_deck.json

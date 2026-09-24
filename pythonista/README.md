@@ -3,11 +3,41 @@
 iPad の Pythonista 3 だけで、ReplayKit の画面キャプチャがどこまで動くかを
 **実機で測る**ための検証コード。カード認識は入っていない。
 
+## そもそも ReplayKit は終わっていた（2026-09-25 判明）
+
+> **ReplayKit は iOS 27 で丸ごと非推奨になった。**
+> 置き換えは **ScreenCaptureKit**（iOS / iPadOS 27.0+）。
+
+Apple 公式の ScreenCaptureKit ドキュメントより。
+
+> ScreenCaptureKit replaces ReplayKit for screen streaming and mirroring.
+> **A broadcast extension is no longer necessary.**
+
+`RPScreenRecorder` も `RPBroadcastSampleHandler` も
+`iOS 10.0–27.0 Deprecated / No longer supported` になっている。
+この PoC は**終了した API を相手にしていた**。
+
+ScreenCaptureKit には条件が2つある。
+
+| | 内容 | Pythonista で満たせるか |
+|---|---|---|
+| Info.plist | `NSScreenCaptureUsageDescription` が必須。無いと iOS がプロセスを終了させる | **不可**。署名済みバンドルの中 |
+| フレーム受信 | `SCStreamOutput` のデリゲート | **不可**。下記の呼び返し問題 |
+
+`sck_probe.py` で実機の状況を確認できる（呼び返しを作らないので落ちない）。
+
+進めるなら **`../ArenaAssistant.swiftpm` を Swift Playgrounds でビルドする**道。
+拡張が不要になったので、Swift Playgrounds だけで完結できる可能性がある
+（`.swiftpm` は app extension ターゲットを持てないため、以前は詰んでいた）。
+
 ## 実機で出た結論（2026-09-25 / iPad / iOS 27.0 / Pythonista 3.10.4）
 
 > **Pythonista では ReplayKit のフレームを受け取れない。**
 > ReplayKit の問題ではなく、**objc_util が別スレッドから Python を
 > 呼び返せない**（segfault する）ため。
+
+この制約は ScreenCaptureKit に乗り換えても消えない。
+フレームがデリゲート経由で届く以上、同じ壁に当たる。
 
 `block_probe.py` が ReplayKit を一切使わずに再現した。
 

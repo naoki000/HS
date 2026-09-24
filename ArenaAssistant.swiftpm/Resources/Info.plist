@@ -2,6 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- ScreenCaptureKit に必須。無いと撮影を始めた瞬間に iOS がプロセスを終了させる。
+	     Pythonista にこのキーが無いことが、あちらで進めなかった決定的な理由。 -->
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>アリーナのピック画面を読み取り、カードの勝率を表示するために画面を取り込みます。</string>
+
 	<!-- アプリが前面にない間も取り込みを続けるために必要。
 	     Package.swift の additionalInfoPlistContentFilePath で参照する。
 	     既定では参照していない（その引数が使えるか未検証のため）。 -->

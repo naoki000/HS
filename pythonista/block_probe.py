@@ -11,13 +11,14 @@ B なら ReplayKit は関係ない。ブロックを使うもっと単純な API
 
 段階を踏んで、落ちた場所を特定する。
 
-    1 objc_basic    ObjCClass を触るだけ。ブロックなし
-    2 block_create  ObjCBlock を作るだけ。呼ばない
-    3 block_sync    同じスレッドから同期で呼ばれるブロック
-                    （NSArray enumerateObjectsUsingBlock:）
-    4 block_async   別スレッドから呼ばれるブロック
-                    （NSOperationQueue addOperationWithBlock:）
-    5 replaykit     ReplayKit を開始する
+1 objc_basic      ObjCClass を触るだけ。ブロックなし
+    2 block_create    ObjCBlock を作るだけ。呼ばない
+    3 block_sync      同じスレッドから同期で呼ばれるブロック
+                      （NSArray enumerateObjectsUsingBlock:）
+    4 block_async     別スレッドから呼ばれるブロック
+                      （NSOperationQueue addOperationWithBlock:）
+    5 objc_in_thread  生の threading.Thread から autoreleasepool 付きで
+                      ObjC を触れるか（参考情報。失敗しても先へ進む）
 
 ReplayKit のフレームコールバックは 4 と同じ「別スレッドから Python を呼ぶ」形。
 **3 が通って 4 で落ちるなら、ReplayKit でも必ず落ちる。**
@@ -36,7 +37,10 @@ import time
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           'probe_state.json')
 
-STEPS = ('objc_basic', 'block_create', 'block_sync', 'block_async')
+STEPS = ('objc_basic', 'block_create', 'block_sync', 'block_async',
+         'objc_in_thread')
+# ReplayKit を試すのに必須な段階。objc_in_thread は参考情報
+REQUIRED = ('objc_basic', 'block_create', 'block_sync', 'block_async')
 
 
 def _load():
@@ -93,8 +97,8 @@ def _resolve_crashes(state, log):
 # ------------------------------------------------------------- 各段階
 
 def _step_objc_basic(log):
-    from objc_util import ObjCClass
-    arr = ObjCClass('NSArray').arrayWithObjects_(1, None)
+    from objc_util import ns
+    arr = ns(['a', 'b', 'c'])
     return 'NSArray count=%s' % arr.count()
 
 
@@ -112,8 +116,8 @@ def _step_block_create(log):
 
 def _step_block_sync(log):
     """同じスレッドから同期で呼ばれるブロック。"""
-    from ctypes import c_void_p, c_ulong, c_int
-    from objc_util import ObjCClass, ObjCBlock, retain_global, ns
+    from ctypes import c_void_p, c_ulong
+    from objc_util import ObjCBlock, retain_global, ns
 
     hits = []
 
@@ -134,7 +138,11 @@ def _step_block_sync(log):
 
 
 def _step_block_async(log):
-    """別スレッドから呼ばれるブロック。ReplayKit と同じ形。"""
+    """別スレッドから呼ばれるブロック。ReplayKit と同じ形。
+
+    ブロックの中では ObjC を一切触らない。触ると「ブロックが呼べない」のか
+    「別スレッドから ObjC を触れない」のか区別がつかなくなる。
+    """
     from ctypes import c_void_p
     from objc_util import ObjCClass, ObjCBlock, retain_global
 
@@ -142,25 +150,54 @@ def _step_block_async(log):
     info = {}
 
     def on_run(_blk):
-        try:
-            from objc_util import ObjCClass as C
-            info['thread'] = str(C('NSThread').currentThread().name())
-            info['is_main'] = bool(C('NSThread').isMainThread())
-        except Exception as e:      # noqa: BLE001
-            info['error'] = '%s: %s' % (type(e).__name__, e)
+        info['thread'] = threading.current_thread().name
+        info['ident'] = threading.get_ident()
         done.set()
 
     blk = ObjCBlock(on_run, restype=None, argtypes=[c_void_p])
     retain_global(blk)
     q = ObjCClass('NSOperationQueue').new()
+    main_ident = threading.get_ident()
     log('[probe]   addOperationWithBlock: を呼びます...')
     q.addOperationWithBlock_(blk)
     log('[probe]   戻ってきました。呼び返しを待ちます...')
     if not done.wait(5.0):
         raise RuntimeError('5秒待ってもブロックが呼ばれませんでした')
-    if info.get('error'):
-        raise RuntimeError(info['error'])
-    return '別スレッドから呼ばれました (is_main=%s)' % info.get('is_main')
+    same = info.get('ident') == main_ident
+    return ('別スレッドから Python を呼び返せました（別スレッド=%s）'
+            % (not same))
+
+
+def _step_objc_in_thread(log):
+    """生のスレッドから ObjC を触れるか。autoreleasepool ありで試す。
+
+    HTTP サーバのスレッドから ObjC を触って segfault した経緯があるので、
+    autoreleasepool で包めば安全なのかを確かめる。通れば設計を緩められる。
+    落ちても本筋には影響しないので最後に置く。
+    """
+    from objc_util import ObjCClass, autoreleasepool
+
+    out = {}
+
+    def work():
+        try:
+            with autoreleasepool():
+                out['v'] = int(ObjCClass('NSProcessInfo').processInfo()
+                               .processorCount())
+        except Exception as e:      # noqa: BLE001
+            out['error'] = '%s: %s' % (type(e).__name__, e)
+
+    t = threading.Thread(target=work, daemon=True)
+    log('[probe]   生のスレッドから ObjC を呼びます...')
+    t.start()
+    t.join(5.0)
+    if t.is_alive():
+        raise RuntimeError('5秒待っても終わりませんでした')
+    if out.get('error'):
+        raise RuntimeError(out['error'])
+    if 'v' not in out:
+        raise RuntimeError('結果が返りませんでした')
+    return 'autoreleasepool ありなら触れました (processorCount=%s)' % out['v']
 
 
 _RUNNERS = {
@@ -168,6 +205,7 @@ _RUNNERS = {
     'block_create': _step_block_create,
     'block_sync': _step_block_sync,
     'block_async': _step_block_async,
+    'objc_in_thread': _step_objc_in_thread,
 }
 
 
@@ -180,12 +218,12 @@ def run(log=print, stop_on_crash=True):
     for name in STEPS:
         s = state.get(name) or {}
         if s.get('ok'):
-            log('[probe]   %-13s OK（前回確認済み: %s）' % (name, s.get('note', '')))
+            log('[probe]   %-14s OK（前回確認済み: %s）' % (name, s.get('note', '')))
             continue
         if s.get('crashed'):
-            log('[probe]   %-13s クラッシュ済みなので飛ばします' % name)
+            log('[probe]   %-14s クラッシュ済みなので飛ばします' % name)
             continue
-        log('[probe]   %-13s 実行中...' % name)
+        log('[probe]   %-14s 実行中...' % name)
         _mark_started(state, name)
         try:
             note = _RUNNERS[name](log)
@@ -193,14 +231,14 @@ def run(log=print, stop_on_crash=True):
             state[name]['ok'] = False
             state[name]['error'] = '%s: %s' % (type(e).__name__, e)
             _save(state)
-            log('[probe]   %-13s 失敗: %s' % (name, state[name]['error']))
+            log('[probe]   %-14s 失敗: %s' % (name, state[name]['error']))
             if stop_on_crash:
                 return False, state
             continue
         _mark_ok(state, name, note)
-        log('[probe]   %-13s OK  %s' % (name, note))
+        log('[probe]   %-14s OK  %s' % (name, note))
 
-    ok = all((state.get(n) or {}).get('ok') for n in STEPS)
+    ok = all((state.get(n) or {}).get('ok') for n in REQUIRED)
     return ok, state
 
 
@@ -216,7 +254,7 @@ def summary(state):
             mark = '失敗: %s' % s.get('error', '')
         else:
             mark = '未実行'
-        out.append('  %-13s %s' % (name, mark))
+        out.append('  %-14s %s' % (name, mark))
     return '\n'.join(out)
 
 
@@ -236,7 +274,16 @@ def verdict(state):
         return 'ObjCBlock を作る時点で落ちます。objc_util のバージョンを疑ってください。'
     if st('objc_basic').get('crashed'):
         return 'ObjC を触るだけで落ちます。objc_util が壊れています。'
-    if all(st(n).get('ok') for n in STEPS):
+    if all(st(n).get('ok') for n in REQUIRED):
+        extra = ''
+        s = st('objc_in_thread')
+        if s.get('ok'):
+            extra = ('\n    なお、autoreleasepool で包めば生のスレッドからでも '
+                     'ObjC を触れます。')
+        elif s.get('crashed'):
+            extra = ('\n    生のスレッドからは autoreleasepool を使っても ObjC を\n'
+                     '    触れません。現行の「ObjC はスクリプトスレッドだけ」が正解です。')
         return ('ObjCBlock は別スレッドからでも正常に呼ばれます。\n'
-                '    つまり原因は ReplayKit 固有です。START_MODE で絞ってください。')
+                '    つまり原因は ReplayKit 固有です。START_MODE で絞ってください。'
+                + extra)
     return '未確定です。もう一度 Run してください。'

@@ -125,6 +125,11 @@ retain_global(blk)          # これが無いと ObjC から呼ばれる前に�
 | `block_create` | ブロックを作るだけ。呼ばない | 作る時点で無理 |
 | `block_sync` | **同じスレッド**から同期で呼ばせる<br>`NSArray enumerateObjectsUsingBlock:` | ObjCBlock 自体が使えない |
 | `block_async` | **別スレッド**から呼ばせる<br>`NSOperationQueue addOperationWithBlock:` | 別スレッドから Python を呼べない |
+| `objc_in_thread` | 生の `threading.Thread` から<br>`autoreleasepool` 付きで ObjC を触る | 参考情報。通れば設計を緩められる |
+
+ブロックの中では ObjC を触らない。触ると「ブロックが呼べない」のか
+「別スレッドから ObjC を触れない」のか区別がつかなくなるため。
+その2つを分けるのが最後の `objc_in_thread`。
 
 **ReplayKit のフレームコールバックは `block_async` と同じ形**（別スレッドから
 Python を呼び返す）。つまり `block_sync` が通って `block_async` で落ちるなら、

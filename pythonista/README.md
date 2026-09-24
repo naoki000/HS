@@ -72,23 +72,83 @@ PHASE 2 が通り、PHASE 3 で落ちるなら CoreImage / UIImage 経路。
 `start()` は1手ごとにログを出す。
 
 ```
-[capture] start() entered  (PHASE 1)
+[capture] start() entered  (PHASE 1 / MODE capture)
 [capture] sharedRecorder OK
 [capture] isAvailable OK
-[capture] selector check OK
 [capture] microphone disabled
 [capture] sizeof(c_long)=8  (NSInteger は 8 のはず)
-[capture] handler block created
-[capture] completion block created
+[capture] selector check OK
+[capture] handler block created (retained)
+[capture] completion block created (retained)
 [capture] calling startCapture...
 [capture] startCapture returned
-[capture] startCapture OK          <- 完了ハンドラ
-[capture] frames=30                <- コールバックが来ている
+[capture] startCapture OK          <- 完了ハンドラ。ここが来れば権限も通っている
+[capture] frames=30                <- フレームのコールバックが来ている
 ```
 
 **アプリごと落ちると Console は消える。** そのため同じログを
 `pythonista/capture_log.txt` に1行ずつ flush して書いている。
 落ちたあとはこのファイルの最終行を見れば、どこまで進んだか分かる。
+
+### `startCapture returned` の直後で落ちる場合
+
+**ブロックの解放を最初に疑う。**
+
+`startCapture returned` が出ているなら、呼び出し自体は成功している。
+その次に起きるのは「ObjC 側がブロックを呼ぶ」ことなので、ブロックが
+すでに解放されていれば、そこで落ちる。Python の try/except では捕まらない。
+
+objc_util の `ObjCBlock` は、**Python の変数に入れておくだけでは足りない**。
+`retain_global()` を通す必要がある。
+
+```python
+blk = ObjCBlock(fn, restype=None, argtypes=[...])
+retain_global(blk)          # これが無いと ObjC から呼ばれる前に解放されうる
+```
+
+このコードは `_make_block()` で必ず `retain_global()` を通し、さらに
+`self._blocks` にも残して二重に保持している。ログの
+`(retained)` はそれが通ったことを示す。
+
+### 開始方法を切り替えて絞る（START_MODE）
+
+それでも落ちる場合、`replaykit_capture.py` の `START_MODE` を変えて、
+どのブロックが原因かを分ける。
+
+| START_MODE | 渡すブロック | 落ちなければ分かること |
+|---|---|---|
+| `'capture'` | フレーム用 + 完了用 | 本命。これが通れば PHASE 2 へ |
+| `'capture_nohandler'` | 完了用だけ（フレーム用は nil） | 完了ブロックは無事。**フレーム用ブロックが原因** |
+| `'record'` | 完了用だけ（旧 API `startRecordingWithHandler:`） | 権限の同意も録画開始も通る。`startCapture` 固有の問題 |
+
+切り分けの順番。
+
+1. `'capture'` で落ちる
+2. → `'capture_nohandler'` を試す
+   - 落ちない: フレーム用ブロックが原因。argtypes か呼び出し規約を疑う
+   - 落ちる: 完了ブロックか `startCapture` 自体が原因
+3. → `'record'` を試す
+   - 落ちない: `startCaptureWithHandler:` 固有の問題
+   - 落ちる: ObjCBlock の仕組みそのものか、権限まわり
+
+### 権限の同意について
+
+ReplayKit のアプリ内キャプチャは、初回に OS の同意ダイアログを出す。
+**同意していない場合は完了ハンドラが error 付きで呼ばれる**のが正常な流れで、
+その場合は次のログが出る。
+
+```
+[capture] ERROR startCapture failed: <エラー内容>
+```
+
+つまり **完了ハンドラすら呼ばれずに落ちているなら、それは権限の問題ではなく
+ブロックの問題**、という切り分けになる。逆に `'record'` モードで同意
+ダイアログが出れば、権限のフロー自体は生きていると分かる。
+
+同意を一度拒否したあとに試し直す場合は、
+`設定 > スクリーンタイム > コンテンツとプライバシーの制限 > 画面収録` が
+「許可」になっているかを確認する。ここが「許可しない」だと
+`isAvailable` が false になる。
 
 ### ObjCBlock の型について
 
@@ -114,8 +174,9 @@ arm64 (LP64) では `RPSampleBufferType` = `NSInteger` = `long` = 8 バイトな
 
 なお **arm64 の呼び出し規約では引数4個はすべて x0–x3 のレジスタ渡し**になる。
 整数幅を取り違えても上位ビットにゴミが入るだけで、それ自体が即クラッシュに
-なる類の間違いではない。したがって PHASE 1 で落ちる場合、argtypes よりも
-ブロックの生存期間やコールバックのスレッド周りを先に疑うべき。
+なる類の間違いではない。実際、Pythonista で ReplayKit を動かしている
+既存の例（LukeMonson の gist）でも argtypes の個数は一貫していないが動いている。
+**したがって argtypes より先に `retain_global()` を疑うべき。**
 
 ## 実行環境
 
@@ -344,6 +405,7 @@ Pythonista が `audio` を宣言していれば無音再生で延命できる可
 | `has_start_capture: false` | iOS 11 未満 |
 | `startCapture failed: ...` | ユーザが許可しなかった／他の録画と競合 |
 | 開始は成功するが `frame_count` が 0 のまま | コールバックが来ていない。ブロックの型か保持漏れを疑う |
+| **`startCapture returned` の直後で落ちる** | ブロックの解放。`retain_global()` を疑う。次に `START_MODE` で絞る |
 | **PHASE 1 でアプリごと落ちる** | JPEG 変換は無関係。`ObjCBlock` か `startCaptureWithHandler:` 周辺 |
 | PHASE 2 で落ちる | CoreMedia / CoreVideo の ctypes シグネチャ |
 | PHASE 3 で落ちる | CoreImage / UIImage 経路 |

@@ -74,8 +74,8 @@ def open_log():
 
 def banner():
     log('=' * 58)
-    log(' Pythonista 画面キャプチャ PoC   PHASE %d'
-        % replaykit_capture.PHASE)
+    log(' Pythonista 画面キャプチャ PoC   PHASE %d / MODE %s'
+        % (replaykit_capture.PHASE, replaykit_capture.START_MODE))
     log('=' * 58)
     log(' Python   : %s' % sys.version.split()[0])
     log(' ログ     : %s' % LOG_PATH)
@@ -138,8 +138,9 @@ def main():
     avail = capture.availability()
     log('')
     log(' ReplayKit の状態')
-    for k in ('objc_util', 'recorder', 'available', 'has_start_capture'):
-        log('   %-18s %s' % (k, avail.get(k)))
+    for k in ('objc_util', 'recorder', 'available', 'recording',
+              'has_start_capture', 'has_start_recording'):
+        log('   %-20s %s' % (k, avail.get(k)))
     if avail.get('import_error'):
         log('   import_error       %s' % avail['import_error'])
     if avail.get('error'):

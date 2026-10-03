@@ -61,10 +61,12 @@ button.danger{background:#2d1618;border-color:#a4232a;color:#ffb4b0;font-weight:
 .quick .qn{font-weight:700;font-size:14px;line-height:1.35;overflow-wrap:anywhere}
 .quick .qw{font-size:12px;color:#9da7b3;line-height:1.5;
   font-variant-numeric:tabular-nums}
-.quick .qw div{display:flex;justify-content:space-between;gap:4px}
+.quick .qw div{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px;align-items:baseline}
+.quick .qw .value{white-space:nowrap;text-align:right}
+.quick .qs{font-size:11px;color:#9da7b3}
 .quick .qw b{color:#3fb950;font-weight:700}
 .quick .qw .low b{color:#f85149}
-.quick .qw .lab{color:#6e7781;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.quick .qw .lab{color:#6e7781;overflow-wrap:anywhere}
 .quick button{margin-top:auto;padding:9px 4px;font-size:13px;
   background:#1f6feb;border-color:#1f6feb}
 .quick button.done{background:#21262d;border-color:#30363d;color:#9da7b3}
@@ -345,9 +347,9 @@ async function loadCal() {
     }
   } catch (e) { /* サーバに届かない場合は後で既定値 */ }
   if (!CARD) {
-    CARD = { left:   { x: 0.113, y: 0.175, w: 0.150, h: 0.271 },
-             middle: { x: 0.269, y: 0.176, w: 0.158, h: 0.263 },
-             right:  { x: 0.436, y: 0.180, w: 0.150, h: 0.250 } };
+    CARD = { left:   { x: 0.113, y: 0.175, w: 0.150, h: 0.343 },
+             middle: { x: 0.269, y: 0.176, w: 0.158, h: 0.343 },
+             right:  { x: 0.436, y: 0.180, w: 0.150, h: 0.343 } };
   }
 }
 function saveCal() {
@@ -684,23 +686,29 @@ const CLASS_JA = {
 };
 
 /// サイトの Deck Winrate は win。見比べられるようこれを太字で出す
-function wrRow(label, a, strong) {
-  if (!a) return '';
-  const low = a.win !== null && a.win !== undefined && a.win < 50;
+function wrRow(label, stats, strong) {
+  if (!stats) return '';
+  const low = stats.win !== null && stats.win !== undefined && stats.win < 50;
   return '<div class="wrRow' + (strong ? ' strong' : '') + (low ? ' low' : '') + '">' +
     '<span class="wrLab">' + esc(label) + '</span>' +
-    '<span>デッキ <b>' + pct(a.win) + '</b></span>' +
-    '<span>引いた時 ' + pct(a.drawn) + '</span>' +
-    '<span>ピック ' + pct(a.pop) + '</span>' +
-    (a.games ? '<span><small>(' + a.games.toLocaleString() + '戦)</small></span>' : '') +
+    '<span>In % of runs ' + pct(stats.pop) + '</span>' +
+    '<span>ドロー勝率 ' + pct(stats.drawn) + '</span>' +
+    '<span>Played Winrate ' + pct(stats.played) + '</span>' +
+    '<span>Deck Winrate <b>' + pct(stats.win) + '</b></span>' +
+    '<span><small>(Total games: ' +
+    (stats.games === null || stats.games === undefined ? '—' : stats.games.toLocaleString('ja-JP')) +
+    ')</small></span>' +
     '</div>';
+}
+
+function resultStats(card) {
+  if (!card) return null;
+  return LAST_HERO ? card.arenaClass : card.arenaAll;
 }
 
 function wrHTML(c) {
   const hero = LAST_HERO;
-  // 使うのはヒーローの数字なので先に出す。全体はその裏付けとして下に置く
-  const rows = (hero ? wrRow(CLASS_JA[hero] || hero, c.arenaClass, true) : '') +
-    wrRow('全体', c.arenaAll, !hero);
+  const rows = wrRow(hero ? CLASS_JA[hero] || hero : '全体', resultStats(c), true);
   return '<div class="wr">' + (rows || 'アリーナの勝率データなし') + '</div>';
 }
 
@@ -711,20 +719,18 @@ function pickOf(c) {
 
 /// 画像のすぐ下に出す簡易版。3択を見ながら選ぶ間はここだけ見れば済むよう、
 /// 名前と勝率と保存だけに絞る。候補や画像は下の詳細側にある。
-function qwRow(label, a) {
-  const low = a && a.win !== null && a.win !== undefined && a.win < 50;
+function qwRow(label, value, percent = true, highlight = false) {
+  const low = highlight && value !== null && value !== undefined && value < 50;
+  const text = percent ? pct(value) :
+    (value === null || value === undefined ? '—' : value.toLocaleString('ja-JP'));
   return '<div' + (low ? ' class="low"' : '') + '>' +
     '<span class="lab">' + esc(label) + '</span>' +
-    '<b>' + pct(a ? a.win : null) + '</b></div>';
+    '<span class="value">' + (highlight ? '<b>' + text + '</b>' : text) + '</span></div>';
 }
 
-/// 並べ替えにも強調にも同じ数字を使う。基準はヒーローの勝率で、
-/// クラス別のデータが無いカードだけ全体で代用する。
 function slotWin(i) {
-  const p = PICKED[i];
-  if (!p) return -1;
-  const a = (LAST_HERO && p.arenaClass) || p.arenaAll;
-  return a && a.win !== null && a.win !== undefined ? a.win : -1;
+  const stats = resultStats(PICKED[i]);
+  return stats && stats.win !== null && stats.win !== undefined ? stats.win : -1;
 }
 
 function bestSlot() {
@@ -742,14 +748,19 @@ function renderQuick() {
   const best = bestSlot();
   q.innerHTML = LAST.map((r, i) => {
     const sel = PICKED[i];
+    const stats = resultStats(sel) || {};
     return '<div class="q' + (i === best ? ' best' : '') + '">' +
       '<div class="qh"><span class="dot ' + r.status + '"></span>' +
       SLOTS[i].label +
       (i === best ? '<span class="top">勝率1位</span>' : '') + '</div>' +
       '<div class="qn">' + esc(sel ? sel.name : '—') + '</div>' +
+      '<span class="qs">' + esc(hero ? CLASS_JA[hero] || hero : '全体') + '</span>' +
       '<div class="qw">' +
-      (hero ? qwRow(CLASS_JA[hero] || hero, sel && sel.arenaClass) : '') +
-      qwRow('全体', sel && sel.arenaAll) + '</div>' +
+      qwRow('In % of runs', stats.pop) +
+      qwRow('ドロー勝率', stats.drawn) +
+      qwRow('Played Winrate', stats.played) +
+      qwRow('Deck Winrate', stats.win, true, true) +
+      qwRow('Total games', stats.games, false) + '</div>' +
       (sel ? '<button class="qadd" data-slot="' + i + '">保存</button>'
            : '<button disabled>保存</button>') +
       '</div>';
@@ -774,7 +785,7 @@ function renderCards() {
       '<li data-slot="' + i + '" data-id="' + esc(c.cardId) + '"' +
       (sel && sel.cardId === c.cardId ? ' class="pick"' : '') + '>' +
       '<span class="nm">' + esc(c.name) + '</span>' +
-      '<span class="sc">' + (c.arena ? pct(c.arena.win) : '—') + '</span>' +
+      '<span class="sc">' + pct((resultStats(c) || {}).win) + '</span>' +
       '<span class="sc">' + c.finalScore.toFixed(3) + '</span></li>').join('');
     return '<section class="card' + (i === best ? ' best' : '') +
       '" style="--rank:' + rank[i] + '"><h2>' + SLOTS[i].label +

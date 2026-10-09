@@ -1200,7 +1200,7 @@ $('host').value = localStorage.getItem('arenaHost') || '';
 $('hero').value = localStorage.getItem('arenaHero') || '';
 $('arenaOnly').checked = localStorage.getItem('arenaOnly') !== '0';
 $('loop').checked = localStorage.getItem('arenaLoop') === '1';
-$('deckSort').value = localStorage.getItem('arenaDeckSort') || 'winDesc';
+$('deckSort').value = localStorage.getItem('arenaDeckSort') || 'costAsc';
 
 // サーバは単一スレッド。起動時の問い合わせを並行させると互いに待たされるので
 // 順番に片付け、最後に映像の取得を始める。

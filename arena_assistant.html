@@ -139,6 +139,14 @@ button.add{width:100%;margin-top:8px;padding:9px;font-size:13px;
 #deckList .tok{background:#2b2411;color:#d29922;border:1px solid #9e6a03;
   border-radius:4px;padding:0 5px;font-size:10px;white-space:nowrap}
 #deckList .del{padding:3px 11px;font-size:14px;line-height:1.3}
+#deckList .deckInfo{flex:1;min-width:0}
+#deckList .deckName{overflow-wrap:anywhere}
+#deckList .deckTags{margin:2px 0;color:#9da7b3;font-size:11px;overflow-wrap:anywhere}
+#deckList .deckStats{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,160px),1fr));
+  gap:2px 12px;margin-top:4px;color:#9da7b3;font-size:12px;font-variant-numeric:tabular-nums}
+#deckList .deckStats>div{display:flex;justify-content:space-between;gap:6px}
+#deckList .deckStats .value{white-space:nowrap}
+#deckList .deckStats .low{color:#f85149}
 #deckList img{cursor:zoom-in}
 #deckFilter{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
 #deckFilter button{padding:4px 10px;font-size:12px;font-weight:400;border-radius:20px}
@@ -202,10 +210,20 @@ button.add{width:100%;margin-top:8px;padding:9px;font-size:13px;
     <h2>保存したカード</h2>
     <span id="deckTotal"></span>
     <select id="deckSort" aria-label="並び順">
-      <option value="winDesc">勝率が高い順</option>
-      <option value="winAsc">勝率が低い順</option>
+      <option value="winDesc">Deck Winrate が高い順</option>
+      <option value="winAsc">Deck Winrate が低い順</option>
+      <option value="popDesc">In % of runs が高い順</option>
+      <option value="popAsc">In % of runs が低い順</option>
+      <option value="drawnDesc">ドロー勝率が高い順</option>
+      <option value="drawnAsc">ドロー勝率が低い順</option>
+      <option value="playedDesc">Played Winrate が高い順</option>
+      <option value="playedAsc">Played Winrate が低い順</option>
+      <option value="gamesDesc">Total games が多い順</option>
+      <option value="gamesAsc">Total games が少ない順</option>
       <option value="costDesc">マナが高い順</option>
       <option value="costAsc">マナが低い順</option>
+      <option value="countDesc">枚数が多い順</option>
+      <option value="countAsc">枚数が少ない順</option>
       <option value="tag">種別順</option>
     </select>
     <button id="deckClear" class="danger">一括削除</button>
@@ -839,9 +857,9 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') $('shade').classList.remove('on');
 });
 
-function deckWin(c) {
+function deckStat(c, field) {
   const a = c.arenaClass || c.arenaAll;
-  return a && a.win !== null && a.win !== undefined ? a.win : null;
+  return a && a[field] !== null && a[field] !== undefined ? a[field] : null;
 }
 
 /// 選んだ種別のいずれかを持つカードを残す（OR 条件）
@@ -888,10 +906,11 @@ function sortDeck(cards) {
     return cards.slice().sort((a, b) =>
       k(a) - k(b) || a.name.localeCompare(b.name, 'ja'));
   }
-  const asc = mode === 'winAsc' || mode === 'costAsc';
-  const key = mode.indexOf('cost') === 0
-    ? (c => c.cost === null || c.cost === undefined ? null : c.cost)
-    : deckWin;
+  const asc = mode.endsWith('Asc');
+  const field = mode.replace(/(Asc|Desc)$/, '');
+  const key = field === 'cost' || field === 'count'
+    ? (c => c[field] === null || c[field] === undefined ? null : c[field])
+    : (c => deckStat(c, field));
   const v = c => {
     const x = key(c);
     return x === null ? (asc ? Infinity : -Infinity) : x;
@@ -924,18 +943,22 @@ function renderDeck(d) {
     : '';
 
   $('deckList').innerHTML = shown.map(c => {
-    const a = c.arenaClass || c.arenaAll;
-    const tags = (c.tags || []).filter(t => TAG_ORDER.indexOf(t) > 4)
-      .map(tagJa).join('・');
+    const a = c.arenaClass || c.arenaAll || {};
+    const tags = (c.tags || []).map(tagJa).join('・');
     return '<li data-id="' + esc(c.cardId) + '">' +
       '<span class="cost">' + (c.cost === null || c.cost === undefined ? '?' : c.cost) +
       '</span>' +
       '<img src="' + ART_URL(c.cardId) + '" alt="" loading="lazy" title="タップでカードを表示">' +
-      '<span class="nm">' + esc(c.name) +
+      '<div class="deckInfo"><div class="deckName">' + esc(c.name) +
       (c.count > 1 ? ' <b class="cnt">×' + c.count + '</b>' : '') +
       (c.token ? ' <span class="tok">付属</span>' : '') +
-      (tags ? ' <small style="opacity:.6">' + esc(tags) + '</small>' : '') + '</span>' +
-      '<span class="sc">' + (a ? pct(a.win) : '—') + '</span>' +
+      '</div>' + (tags ? '<div class="deckTags">' + esc(tags) + '</div>' : '') +
+      '<div class="deckStats">' +
+      qwRow('In % of runs', a.pop) +
+      qwRow('ドロー勝率', a.drawn) +
+      qwRow('Played Winrate', a.played) +
+      qwRow('Deck Winrate', a.win, true, true) +
+      qwRow('Total games', a.games, false) + '</div></div>' +
       '<button class="del" title="1枚減らす">−</button></li>';
   }).join('') ||
     '<li class="empty">' + (has ? '条件に合うカードがありません' : 'まだありません') + '</li>';

@@ -158,12 +158,20 @@ def thumbs(data, src):
 def fetch_one(card, src):
     url = ART_URL[src].format(id=card['id'])
     try:
-        g, c = thumbs(get(url), src)
-        return card, g, c, None
-    except urllib.error.HTTPError as e:
-        return card, None, None, 'HTTP %s' % e.code
-    except Exception as e:  # noqa: BLE001 - 1枚の失敗で全体を止めない
-        return card, None, None, '%s: %s' % (type(e).__name__, e)
+        try:
+            data = get(url)
+        except urllib.error.HTTPError as error:
+            prefix, _, original_id = card['id'].partition('_')
+            if (error.code != 404 or prefix not in ('CORE', 'VAN', 'LEG')
+                    or not original_id):
+                raise
+            data = get(ART_URL[src].format(id=original_id))
+        gray, color = thumbs(data, src)
+        return card, gray, color, None
+    except urllib.error.HTTPError as error:
+        return card, None, None, 'HTTP %s' % error.code
+    except Exception as error:  # noqa: BLE001 - 1枚の失敗で全体を止めない
+        return card, None, None, '%s: %s' % (type(error).__name__, error)
 
 
 def gem_feature(card_id, locale):
